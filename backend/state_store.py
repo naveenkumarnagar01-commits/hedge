@@ -155,7 +155,12 @@ class StateStore:
     async def set(self, key: str, value: Any):
         self._cache[key] = value
         loop = asyncio.get_event_loop()
-        if self._db_path:
+        if self._pg_pool:
+            try:
+                await self._pg_write(key, value)
+            except Exception as e:
+                log.error(f"PostgreSQL save [{key}]: {e}")
+        elif self._db_path:
             try:
                 await loop.run_in_executor(_pool, self._sqlite_write, key, value)
             except Exception as e:
@@ -487,6 +492,17 @@ class StateStore:
             rows = await con.fetch("SELECT key, value FROM agent_state")
             for row in rows:
                 self._cache[row["key"]] = json.loads(row["value"])
+
+    async def _pg_write(self, key: str, value: Any):
+        async with self._pg_pool.acquire() as con:
+            await con.execute(
+                """INSERT INTO agent_state (key, value, updated_at)
+                   VALUES ($1, $2::jsonb, $3)
+                   ON CONFLICT (key) DO UPDATE
+                   SET value = EXCLUDED.value,
+                       updated_at = EXCLUDED.updated_at""",
+                key, json.dumps(value), time.time(),
+            )
 
 
 store = StateStore()
