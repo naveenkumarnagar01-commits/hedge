@@ -1,0 +1,18 @@
+# Hedge Trader Platform — Python dependencies
+
+# Web framework + async
+fastapi==0.110.0
+uvicorn[standard]==0.27.1
+websockets==12.0
+
+# Database
+asyncpg==0.29.0
+
+# Redis (optional — for multi-process message bus)
+aioredis==2.0.1
+
+# Exchange
+# (no ccxt needed — we use raw WS + REST via urllib/websockets)
+
+# Utilities
+python-dotenv==1.0.0

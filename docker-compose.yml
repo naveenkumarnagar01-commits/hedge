@@ -1,0 +1,91 @@
+version: "3.9"
+
+services:
+
+  # ── PostgreSQL ──────────────────────────────────────────────────────────────
+  postgres:
+    image: postgres:15-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER:     hedge
+      POSTGRES_PASSWORD: hedge123
+      POSTGRES_DB:       hedgedb
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      # Auto-applied on first boot when volume is empty
+      - ./backend/db/migrations/001_initial.sql:/docker-entrypoint-initdb.d/001_initial.sql:ro
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test:     ["CMD-SHELL", "pg_isready -U hedge -d hedgedb"]
+      interval: 5s
+      timeout:  5s
+      retries:  10
+
+  # ── Redis ───────────────────────────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test:     ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      retries:  5
+
+  # ── Backend (FastAPI + all agents) ─────────────────────────────────────────
+  #
+  # Serves:
+  #   GET  /          → panel.html  (single-file trading dashboard)
+  #   REST /api/*     → FastAPI endpoints
+  #   WS   /ws        → real-time event stream
+  #
+  # panel.html is copied into the image at /app/panel.html by Dockerfile.backend.
+  # Do NOT remove that COPY line — gateway.py resolves it as ../../panel.html
+  # relative to backend/api/gateway.py inside the container.
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql://hedge:hedge123@postgres:5432/hedgedb
+      REDIS_URL:    redis://redis:6379
+      HOST:         0.0.0.0
+      PORT:         "8000"
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test:     ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/api/status')\""]
+      interval: 10s
+      timeout:  5s
+      retries:  6
+      start_period: 30s
+
+  # ── Frontend (React/Vite → Nginx) ──────────────────────────────────────────
+  #
+  # Nginx listens on port 3000 and proxies:
+  #   /api/*  → http://backend:8000
+  #   /ws     → ws://backend:8000/ws  (WebSocket upgrade)
+  #
+  # Access the full dashboard at http://localhost:3000
+  # Access panel.html directly  at http://localhost:8000
+  frontend:
+    build:
+      context:    ./frontend
+      dockerfile: Dockerfile.frontend
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    depends_on:
+      backend:
+        condition: service_healthy
+
+volumes:
+  postgres_data:

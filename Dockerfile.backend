@@ -1,0 +1,16 @@
+FROM python:3.12-slim
+
+WORKDIR /app
+
+# Dependencies
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Source — panel.html must sit at /app/panel.html so gateway.py resolves it correctly
+COPY backend/ ./backend/
+COPY panel.html ./panel.html
+
+ENV PYTHONPATH=/app
+ENV PYTHONUNBUFFERED=1
+
+CMD ["python", "-m", "backend.main"]
