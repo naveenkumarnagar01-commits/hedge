@@ -2692,13 +2692,23 @@
           ? Math.round((leg.close_price - entry) * (leg.qty || 1) * 100) / 100
           : bid > 0 ? Math.round((bid - entry) * (leg.qty || 1) * 100) / 100 : null;
         const legPnlCol = legPnl == null ? '#6b7280' : legPnl >= 0 ? '#4ade80' : '#f87171';
-        const progPct   = target > 0 && bid > 0 ? Math.min(bid / target * 100, 100) : 0;
+        // Progress bar only makes sense while leg is open
+        const progPct   = !leg.closed && target > 0 && bid > 0 ? Math.min(bid / target * 100, 100) : 0;
         const progCol   = progPct >= 100 ? '#4ade80' : progPct >= 70 ? '#fbbf24' : '#60a5fa';
+        const isExpired = leg.close_reason === 'EXPIRED';
         const statusBadge = leg.closed
-          ? `<span style="color:${leg.close_reason==='EXPIRED'?'#6b7280':'#4ade80'};font-weight:bold;font-size:10px">${leg.close_reason==='EXPIRED'?'EXPIRED':'✓ CLOSED @ $'+fmt(leg.close_price)}</span>`
-          : `<span style="color:#fbbf24;font-size:10px">OPEN</span>`;
+          ? `<span style="color:${isExpired?'#ef4444':'#4ade80'};font-weight:bold;font-size:10px;padding:1px 6px;border-radius:3px;background:${isExpired?'#1c0505':'#052015'}">${isExpired?'✗ EXPIRED':'✓ CLOSED @ $'+fmt(leg.close_price)}</span>`
+          : `<span style="color:#fbbf24;font-size:10px;padding:1px 6px;border-radius:3px;background:#1a1400">OPEN</span>`;
+        const progressHtml = leg.closed
+          ? `<div style="font-size:9px;color:${isExpired?'#ef444488':'#4b5563'};text-align:center;padding:2px 0">
+               ${isExpired ? `✗ Expired worthless — full premium lost ($${fmt(entry * (leg.qty||1))})` : `✓ Closed at $${fmt(leg.close_price)} · ${leg.close_reason||''}`}
+             </div>`
+          : `<div style="background:#111;border-radius:3px;height:4px;overflow:hidden;margin-bottom:4px">
+               <div style="background:${progCol};height:100%;width:${progPct.toFixed(1)}%;transition:width .5s"></div>
+             </div>
+             <span style="font-size:9px;color:#4b5563">${progPct.toFixed(0)}% to TP</span>`;
         return `
-          <div style="background:#0d0d0d;border:1px solid ${accentCol}44;border-radius:6px;padding:10px 14px;flex:1">
+          <div style="background:#0d0d0d;border:1px solid ${leg.closed?(isExpired?'#4b0f0f':'#0f3320'):(accentCol+'44')};border-radius:6px;padding:10px 14px;flex:1">
             <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
               <div>
                 <span style="font-size:10px;font-weight:bold;color:${accentCol}">${label}</span>
@@ -2712,13 +2722,10 @@
               <div style="display:flex;justify-content:space-between"><span style="color:#6b7280">Entry</span><span style="font-family:monospace">$${fmt(entry)}</span></div>
               <div style="display:flex;justify-content:space-between"><span style="color:#6b7280">Target</span><span style="font-family:monospace;color:#fbbf24">$${fmt(target)}</span></div>
               <div style="display:flex;justify-content:space-between"><span style="color:#6b7280">Best Bid</span><span style="font-family:monospace;color:${bid>=target&&bid>0?'#4ade80':'#e5e7eb'}">$${fmt(bid)}</span></div>
-              <div style="display:flex;justify-content:space-between"><span style="color:#6b7280">Mark</span><span style="font-family:monospace;color:${mark>=target*1.02&&mark>0?'#a78bfa':'#e5e7eb'}">$${fmt(mark)}</span></div>
-            </div>
-            <div style="background:#111;border-radius:3px;height:4px;overflow:hidden;margin-bottom:6px">
-              <div style="background:${progCol};height:100%;width:${progPct.toFixed(1)}%;transition:width .5s"></div>
+              <div style="display:flex;justify-content:space-between"><span style="color:#6b7280">Mark</span><span style="font-family:monospace;color:${mark>=target&&mark>0?'#a78bfa':'#e5e7eb'}">$${fmt(mark)}</span></div>
             </div>
             <div style="display:flex;justify-content:space-between;align-items:center">
-              <span style="font-size:9px;color:#4b5563">${progPct.toFixed(0)}% to TP</span>
+              ${progressHtml}
               <span style="font-size:12px;font-weight:bold;color:${legPnlCol}">${legPnl!=null?'$'+fmt(legPnl):'—'}</span>
             </div>
           </div>`;
@@ -3849,6 +3856,7 @@ async function _updateSessionBanner() {
       const pRatio   = CFG[pfx+'partial_profit_ratio']||1.1;
       const ptrig    = pos.partial_trigger_price||0;
       const fullTp   = pos.full_close_price||0;
+      const slPrice  = pos.sl_price||0;
       const rebuy    = pos.pending_rebuy_price||0;
       const rebuyQ   = pos.pending_rebuy_qty||0;
       const pDone    = pos.partial_done||false;
@@ -3873,6 +3881,9 @@ async function _updateSessionBanner() {
 
           mkOrd(inPos?'PENDING':'WAITING', `Full TP — close all when fut PnL reaches $${fmt(remaining,0)} more`, fullTp,
             pDone&&rebuy===0?`New avg factored in`:`$${fmt(fTarget,0)} total target`, '#a78bfa') +
+
+          (slPrice>0 ? mkOrd('PENDING', `STOP LOSS — close ALL if price crosses SL level`, slPrice,
+            `Futures + option both closed immediately`, '#ef4444') : '') +
 
           mkOrd('WAITING', `Squareoff @ ${ft(forceH,forceM)} IST — close ALL regardless`, 0,
             `${key==='bull'?'PUT':'CALL'} option first (limit @ mark) → futures market`, '#f87171')
@@ -5417,6 +5428,7 @@ async function _updateSessionBanner() {
             label: '💼 Position Size & Profit Targets',
             params: [
               { k: 'bull_contract_qty',         l: 'Trade Size (BTC)',         step: 0.01, min: 0.01, max: 1,      note: 'How many BTC to trade per setup. Example: 1 = 1 BTC futures + 1 PUT option contract' },
+              { k: 'bull_sl_points',             l: '🛑 Stop Loss (pts)',        step: 10,   min: 0,    max: 5000,   note: 'STOP LOSS: close entire position if price drops this many pts from entry. 0 = disabled. Example: 500 = cut loss if BTC drops $500 from entry' },
               { k: 'bull_partial_profit_ratio',  l: 'Partial Profit Trigger',   step: 0.01, min: 1.0,  max: 10,     note: 'Sell half futures when profit = this × premium paid. Example: 1.1 = sell 50% futures when profit ≥ 110% of option cost' },
               { k: 'bull_full_close_target',     l: 'Full Close Target ($)',    step: 10,   min: 10,   max: 100000, note: 'Close everything when total profit reaches this. Example: 800 = close when total PnL ≥ $800' },
             ]
@@ -5462,6 +5474,7 @@ async function _updateSessionBanner() {
             label: '💼 Position Size & Profit Targets',
             params: [
               { k: 'bear_contract_qty',         l: 'Trade Size (BTC)',       step: 0.01, min: 0.01, max: 1,      note: 'How many BTC to trade. Example: 1 = 1 BTC short futures + 1 CALL option contract' },
+              { k: 'bear_sl_points',             l: '🛑 Stop Loss (pts)',      step: 10,   min: 0,    max: 5000,   note: 'STOP LOSS: close entire position if price rises this many pts from entry. 0 = disabled. Example: 500 = cut loss if BTC rises $500 from entry' },
               { k: 'bear_partial_profit_ratio',  l: 'Partial Profit Trigger', step: 0.01, min: 1.0,  max: 10,     note: 'Sell half futures when profit = this × premium paid. Example: 1.1 = sell when profit ≥ 110% of option cost' },
               { k: 'bear_full_close_target',     l: 'Full Close Target ($)',  step: 10,   min: 10,   max: 100000, note: 'Close everything when total profit reaches this. Example: 800 = close at $800 total PnL' },
             ]
@@ -5503,7 +5516,7 @@ async function _updateSessionBanner() {
             label: '💼 Position Size & Profit',
             params: [
               { k: 'vol_contract_qty',        l: 'Trade Size (BTC)',        step: 0.01, min: 0.01, max: 1,      note: 'BTC per event trade. Example: 1 = 1 BTC futures + 1 option' },
-              { k: 'vol_partial_profit_ratio', l: 'Partial Profit Trigger',  step: 0.01, min: 1.0,  max: 10,     note: 'Sell half futures at this × premium. Example: 1.1 = sell at 110% of premium' },
+              { k: 'vol_sl_pct',              l: '🛑 Losing Leg Cut (%)',    step: 0.01, min: 0,    max: 1,      note: 'Cut losing straddle leg when mark drops to this % of entry. 0.15 = sell when mark ≤ 15% of entry price. 0 = hold until expiry' },
               { k: 'vol_session_pnl_target',   l: 'Session PnL Target ($)',  step: 10,   min: 10,   max: 100000, note: 'Close all when session profit reaches this. Example: 800' },
             ]
           },

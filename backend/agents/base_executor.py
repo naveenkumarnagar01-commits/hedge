@@ -111,6 +111,7 @@ class BaseExecutor:
         # Pre-calculated price levels for display (updated on every position change)
         self.partial_trigger_price: float = 0.0  # futures price at which 50% books
         self.full_close_price:      float = 0.0  # approx futures price for full TP
+        self.sl_price:              float = 0.0  # stop-loss level (0 = disabled)
 
         # Session realized PnL — accumulated as each leg closes
         # Persists until daily reset so post-squareoff display shows correct final values
@@ -749,6 +750,30 @@ class BaseExecutor:
                 await self._broadcast_position()
                 return
 
+        # ── Stop Loss check ──────────────────────────────────────────────────────────
+        sl_pts = float(self._cfg("sl_points") or 0.0)
+        if sl_pts > 0 and self.futures_remaining_qty > 0:
+            sl_hit = (
+                (self.direction == "BULLISH" and price <= self.futures_entry_price - sl_pts) or
+                (self.direction == "BEARISH" and price >= self.futures_entry_price + sl_pts)
+            )
+            if sl_hit:
+                await self._log(
+                    f"STOP LOSS triggered @ {price:.2f}  "
+                    f"entry={self.futures_entry_price:.2f}  SL={sl_pts:.0f}pts  "
+                    f"fut_pnl={fut_pnl:+.2f}",
+                    level="WARNING"
+                )
+                from backend import telegram_alert as tg
+                tg.send(
+                    f"🛑 <b>{self.name} — STOP LOSS HIT</b>\n"
+                    f"Price: ${price:.2f}  Entry: ${self.futures_entry_price:.2f}\n"
+                    f"Futures PnL: <b>${fut_pnl:+.2f}</b>\n"
+                    f"Time: {ist_now_str()}"
+                )
+                await self._do_force_close()
+                return
+
         # ── Full close target (futures only — option stays open until squareoff) ────
         if fut_pnl >= full_target:
             # Cancel any pending rebuy before closing
@@ -1321,6 +1346,7 @@ class BaseExecutor:
             # Order price levels (for panel display)
             "partial_trigger_price":           self.partial_trigger_price,
             "full_close_price":                self.full_close_price,
+            "sl_price":                        self.sl_price,
             "pending_rebuy_price":             self.pending_rebuy_price,
             "pending_rebuy_qty":               self.pending_rebuy_qty,
             # Position timing & zone
@@ -1623,6 +1649,12 @@ class BaseExecutor:
             self.partial_trigger_price = round(E - pnl_partial    / Q, 2)
             self.full_close_price      = round(E - remaining_pnl  / Q, 2)
 
+        sl_pts = float(self._cfg("sl_points") or 0.0)
+        if sl_pts > 0 and E:
+            self.sl_price = round(E - sl_pts if self.direction == "BULLISH" else E + sl_pts, 2)
+        else:
+            self.sl_price = 0.0
+
     async def _reset_daily(self):
         """Reset trigger/loop state for a new day or same-day retry."""
         self.triggered           = False
@@ -1762,6 +1794,7 @@ class BaseExecutor:
             self.pending_rebuy_qty         = s.get("pending_rebuy_qty", 0.0)
             self.partial_trigger_price     = s.get("partial_trigger_price", 0.0)
             self.full_close_price          = s.get("full_close_price", 0.0)
+            self.sl_price                  = s.get("sl_price", 0.0)
             self.session_realized_futures_pnl = s.get("session_realized_futures_pnl", 0.0)
             self.session_realized_hedge_pnl   = s.get("session_realized_hedge_pnl", 0.0)
             self.session_start_ts             = s.get("session_start_ts", 0.0)

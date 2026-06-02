@@ -562,12 +562,42 @@ class VolatileTrader:
                 await self._expire_leg(leg)
             elif not leg["sell_placed"]:
                 target = leg["target"]
+                # ── TP check ────────────────────────────────────────────────
                 if bid > 0 and bid >= target:
-                    # Bid already at/above target — fill at actual bid (best real price)
                     await self._sell_leg(leg, bid, "BID≥TP")
                 elif mark > 0 and mark >= target:
-                    # Mark confirms option is at/above target — simulate limit sell at target
                     await self._sell_leg(leg, target, "MARK≥TP")
+                else:
+                    # ── SL: cut losing leg when mark drops to X% of entry ──
+                    sl_pct = float(getattr(cfg, "vol_sl_pct", 0.0))
+                    if sl_pct > 0 and mark > 0:
+                        sl_threshold = leg["entry_price"] * sl_pct
+                        if mark <= sl_threshold:
+                            sell_price = max(bid, mark * 0.95) if bid > 0 else mark * 0.95
+                            await self._sell_leg(leg, round(sell_price, 2), f"SL:{sl_pct*100:.0f}%")
+                            await self._log(
+                                f"CUT LOSS: {leg['symbol']} mark={mark:.2f} <= "
+                                f"SL threshold {sl_threshold:.2f} ({sl_pct*100:.0f}% of entry {leg['entry_price']:.2f})",
+                                level="WARNING"
+                            )
+
+        # ── Close-other-leg when one hits TP (locks in combined profit) ─────────
+        if getattr(cfg, "vol_close_other_on_tp", True):
+            for this_leg, other_leg in ((self._put_leg, self._call_leg),
+                                         (self._call_leg, self._put_leg)):
+                if (this_leg and other_leg and
+                        this_leg.get("closed") and this_leg.get("close_reason") not in ("EXPIRED",) and
+                        not other_leg.get("closed") and not other_leg.get("sell_placed")):
+                    other_bid  = (other_leg.get("live") or {}).get("bid", 0)
+                    other_mark = (other_leg.get("live") or {}).get("mark", 0)
+                    close_px   = other_bid if other_bid > 0 else (other_mark * 0.95 if other_mark > 0 else 0)
+                    if close_px > 0:
+                        await self._sell_leg(other_leg, round(close_px, 2), "CLOSE_OTHER_ON_TP")
+                        await self._log(
+                            f"Closing other leg {other_leg['symbol']} @ {close_px:.2f} "
+                            f"(partner leg hit TP — locking combined profit)",
+                            level="WARNING"
+                        )
 
         await self._broadcast()
 
