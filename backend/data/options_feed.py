@@ -522,50 +522,70 @@ def get_puts_for_strike(min_intrinsic: float = 0, max_premium: float = 9999,
 
 def get_nearest_itm_put(futures_price: float) -> Optional[dict]:
     """
-    Nearest ITM put = smallest (strike - futures_price) where strike > futures_price.
-    NOTE: does NOT require ask > 0 — returns the option even without depth data so
-    the caller's checklist can show prem_ok=False rather than pending indefinitely.
-    Intrinsic recomputed here using futures_price (more accurate than spot-based chain).
+    Nearest ITM put = lowest strike > futures_price (smallest intrinsic).
+    Uses _all_strikes as the authoritative strike list so the correct strike is
+    always selected even if depth data for that strike hasn't arrived yet from the WS.
+    Returns the option even with ask=0 so the checklist shows prem_ok=False
+    instead of stalling indefinitely on the wrong (more distant) strike.
     """
-    itm_puts = [
-        o for o in _chain.values()
-        if o["side"] == "P" and o["strike"] > futures_price
-    ]
-    if not itm_puts:
+    if not _all_strikes:
+        # Fallback to chain scan when strike list not yet loaded
+        itm_puts = [o for o in _chain.values()
+                    if o["side"] == "P" and o["strike"] > futures_price]
+        if not itm_puts:
+            return None
+        nearest_strike = min(o["strike"] for o in itm_puts)
+    else:
+        above = [s for s in _all_strikes if s > futures_price]
+        if not above:
+            return None
+        nearest_strike = min(above)
+
+    sym = _sym_name(nearest_strike, "P")
+    opt = _chain.get(sym)
+    if opt is None:
         return None
-    nearest = min(itm_puts, key=lambda x: x["strike"])
-    nearest = dict(nearest)  # always copy — we mutate below
-    # Recompute intrinsic & TV using futures mark price (not spot)
-    intr = max(nearest["strike"] - futures_price, 0.0)
-    ask  = nearest.get("ask") or 0.0
-    mark = nearest.get("mark") or 0.0
+    opt  = dict(opt)
+    intr = max(nearest_strike - futures_price, 0.0)
+    ask  = opt.get("ask") or 0.0
+    mark = opt.get("mark") or 0.0
     tv   = max((ask if ask > 0 else mark) - intr, 0.0)
-    nearest["intrinsic"]   = round(intr, 2)
-    nearest["time_value"]  = round(tv, 2)
+    opt["intrinsic"]  = round(intr, 2)
+    opt["time_value"] = round(tv, 2)
     if mark > 0:
-        nearest["spread_pct"] = round(abs(ask - mark) / mark * 100, 2)
-    return nearest
+        opt["spread_pct"] = round(abs(ask - mark) / mark * 100, 2)
+    return opt
 
 
 def get_nearest_itm_call(futures_price: float) -> Optional[dict]:
     """
-    Nearest ITM call = smallest (futures_price - strike) where strike < futures_price.
-    Does NOT require ask > 0 — see get_nearest_itm_put for rationale.
+    Nearest ITM call = highest strike < futures_price (smallest intrinsic).
+    Uses _all_strikes as the authoritative strike list — prevents selecting a more
+    distant strike just because a closer one hasn't appeared in the depth window yet.
     """
-    itm_calls = [
-        o for o in _chain.values()
-        if o["side"] == "C" and o["strike"] < futures_price
-    ]
-    if not itm_calls:
+    if not _all_strikes:
+        itm_calls = [o for o in _chain.values()
+                     if o["side"] == "C" and o["strike"] < futures_price]
+        if not itm_calls:
+            return None
+        nearest_strike = max(o["strike"] for o in itm_calls)
+    else:
+        below = [s for s in _all_strikes if s < futures_price]
+        if not below:
+            return None
+        nearest_strike = max(below)
+
+    sym = _sym_name(nearest_strike, "C")
+    opt = _chain.get(sym)
+    if opt is None:
         return None
-    nearest = max(itm_calls, key=lambda x: x["strike"])
-    nearest = dict(nearest)
-    intr = max(futures_price - nearest["strike"], 0.0)
-    ask  = nearest.get("ask") or 0.0
-    mark = nearest.get("mark") or 0.0
+    opt  = dict(opt)
+    intr = max(futures_price - nearest_strike, 0.0)
+    ask  = opt.get("ask") or 0.0
+    mark = opt.get("mark") or 0.0
     tv   = max((ask if ask > 0 else mark) - intr, 0.0)
-    nearest["intrinsic"]   = round(intr, 2)
-    nearest["time_value"]  = round(tv, 2)
+    opt["intrinsic"]  = round(intr, 2)
+    opt["time_value"] = round(tv, 2)
     if mark > 0:
-        nearest["spread_pct"] = round(abs(ask - mark) / mark * 100, 2)
-    return nearest
+        opt["spread_pct"] = round(abs(ask - mark) / mark * 100, 2)
+    return opt

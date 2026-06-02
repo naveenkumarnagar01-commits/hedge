@@ -1507,8 +1507,12 @@
           }).catch(()=>{});
       });
 
-      // 4. Volatile tab uses only manually-saved events (via WS POSITION_UPDATE).
-      if (activeTab === 4) renderVolatileTab();
+      // 4. Volatile tab — always re-fetch events from DB on reconnect
+      fetch('/api/volatile/events').then(r=>r.json()).then(d => {
+        if (!S.vol) S.vol = {};
+        S.vol.events = d.events || [];
+        if (activeTab === 4) renderVolatileTab();
+      }).catch(() => { if (activeTab === 4) renderVolatileTab(); });
 
       // 5. Always reload BTC candles on reconnect so real-time updates resume on any tab
       S._chartReady = false;
@@ -1665,7 +1669,7 @@
               _btcCandles.update(cdata);
               _btcLastCandle = { ...cdata };   // always full — real open overwrites TICK placeholder
               _btcLastCandleFinal = c.is_final === true;
-              if (_btcVol && c.volume) {
+              if (_btcVol && c.volume != null) {
                 _btcVol.update({ time:ctime, value:c.volume,
                   color: c.close>=c.open ? 'rgba(38,166,154,.5)' : 'rgba(239,83,80,.5)' });
               }
@@ -1760,7 +1764,10 @@
     function toggleSec(id) { const e = el(id); if (e) e.style.display = e.style.display === 'none' ? 'block' : 'none'; }
     function apiPost(url, body = {}) {
       return fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
-        .then(r => r.json()).catch(console.warn);
+        .then(r => {
+          if (!r.ok) return r.json().then(e => Promise.reject(e));
+          return r.json();
+        }).catch(e => { console.warn('[apiPost]', url, e); return Promise.reject(e); });
     }
     function showTab(i) {
       activeTab = i;
@@ -1770,9 +1777,13 @@
       if (i === 2) renderTraderTab('bull');
       if (i === 3) renderTraderTab('bear');
       if (i === 4) {
-        // Volatile tab only uses manually-saved events from /api/volatile/events.
-        // The global event_calendar (FOMC/CPI auto-schedule) is NOT used here.
         renderVolatileTab();
+        // Always fetch fresh events from DB on tab open (covers reconnect + first load)
+        fetch('/api/volatile/events').then(r=>r.json()).then(d => {
+          if (!S.vol) S.vol = {};
+          S.vol.events = d.events || [];
+          renderVolatileTab();
+        }).catch(() => {});
       }
       if (i === 5) initOrderBlocks();
       if (i === 6) _renderUserManual();
@@ -2319,13 +2330,13 @@
     function saveAnCfg() {
       const time = el('m-in-t').value.split(':');
       const payload = {
-        candle_count: parseInt(el('m-in-c').value),
-        candle_tf_minutes: parseInt(el('m-in-tf').value),
+        candle_count: parseInt(el('m-in-c').value, 10),
+        candle_tf_minutes: parseInt(el('m-in-tf').value, 10),
         dominance_ratio_high: parseFloat(el('m-in-h').value),
         dominance_ratio_low: parseFloat(el('m-in-l').value),
         delta_touch: parseFloat(el('m-in-d').value),
-        analyst_h: parseInt(time[0]),
-        analyst_m: parseInt(time[1])
+        analyst_h: parseInt(time[0], 10),
+        analyst_m: parseInt(time[1], 10)
       };
       apiPost('/api/config', payload).then(() => {
         closeAnalystModal();
@@ -2387,12 +2398,17 @@
         if (d.status === 'saved') {
           _volNewEventName = '';
           _volNewEventTime = '';
+          // Immediately update local state so re-render shows the new event
+          // without waiting for the next WS POSITION_UPDATE
+          if (!S.vol) S.vol = {};
+          if (!S.vol.events) S.vol.events = [];
+          if (d.event) S.vol.events.push(d.event);
           _volShowFeedback('Event saved to database ✓', '#4ade80');
           renderVolatileTab();
         } else if (d.status === 'duplicate') {
           _volShowFeedback('Duplicate — same event already exists.', '#f59e0b');
         } else if (d.detail) {
-          _volShowFeedback('Error: ' + d.detail, '#f87171');
+          _volShowFeedback('Error: ' + (typeof d.detail === 'string' ? d.detail : JSON.stringify(d.detail)), '#f87171');
         }
       })
       .catch(e => {
@@ -3099,7 +3115,7 @@
             
         url = `/api/journal/sessions?trader=${tr}&from_date=${from}&to_date=${to}`;
         const sessR = await fetch(url).then(x=>x.json());
-        el('j-list').innerHTML = sessR.sessions.map(s => {
+        el('j-list').innerHTML = (sessR.sessions || []).map(s => {
             return `<div class="card" style="cursor:pointer" onclick="_expandSess('${s.session_id}', this)">
                 <div class="rw">
                     <span>${s.session_date} | ${s.trader_name}</span>
@@ -5700,10 +5716,13 @@ async function _updateSessionBanner() {
     }
     function onSC(key, inp) {
       const orig = CFG[key] ?? '';
-      const chg = Number(inp.value) != Number(orig);
+      const parsed = Number(inp.value);
+      if (isNaN(parsed)) { inp.style.borderColor = '#ef4444'; return; }
+      inp.style.borderColor = '';
+      const chg = parsed !== Number(orig);
       inp.classList.toggle('chg', chg);
       setText('si-w-' + key, chg ? `was:${orig}` : '');
-      if (chg) cfgEdits[key] = Number(inp.value); else delete cfgEdits[key];
+      if (chg) cfgEdits[key] = parsed; else delete cfgEdits[key];
       const has = Object.keys(cfgEdits).length > 0;
       el('save-btn').disabled = !has;
       setText('save-hint', has ? Object.keys(cfgEdits).length + ' unsaved change(s)' : '');

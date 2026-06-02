@@ -50,6 +50,23 @@ def is_time_before_in_session(h1: int, m1: int, h2: int, m2: int, expiry_h: int,
 def is_time_before_or_equal_in_session(h1: int, m1: int, h2: int, m2: int, expiry_h: int, expiry_m: int) -> bool:
     return _session_minutes(h1, m1, expiry_h, expiry_m) <= _session_minutes(h2, m2, expiry_h, expiry_m)
 
+def is_in_session_range(now_h: int, now_m: int, start_h: int, start_m: int,
+                         end_h: int, end_m: int, expiry_h: int, expiry_m: int) -> bool:
+    """True if now is within [start, end] using session-relative ordering.
+    Handles cross-midnight windows correctly (e.g. 22:10 → 04:00)."""
+    now_s   = _session_minutes(now_h,   now_m,   expiry_h, expiry_m)
+    start_s = _session_minutes(start_h, start_m, expiry_h, expiry_m)
+    end_s   = _session_minutes(end_h,   end_m,   expiry_h, expiry_m)
+    return start_s <= now_s <= end_s
+
+def has_reached_session_time(now_h: int, now_m: int, target_h: int, target_m: int,
+                              expiry_h: int, expiry_m: int) -> bool:
+    """True if now >= target in session-relative ordering.
+    Prevents premature force-close when force_close is next-day."""
+    now_s    = _session_minutes(now_h,    now_m,    expiry_h, expiry_m)
+    target_s = _session_minutes(target_h, target_m, expiry_h, expiry_m)
+    return now_s >= target_s
+
 def get_session_boundaries(now_ist: datetime.datetime, expiry_h: int, expiry_m: int):
     expiry_today = now_ist.replace(hour=expiry_h, minute=expiry_m, second=0, microsecond=0)
     if now_ist <= expiry_today:

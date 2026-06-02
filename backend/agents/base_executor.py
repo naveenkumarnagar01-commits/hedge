@@ -30,7 +30,8 @@ from backend.message_bus import (
 )
 from backend.config import cfg
 from backend.state_store import store
-from backend.utils import ist_now, ist_hm, ist_now_str
+from backend.utils import (ist_now, ist_now_str,
+                           is_in_session_range, has_reached_session_time)
 
 SET_LINES = "SET_LINES"
 
@@ -251,6 +252,9 @@ class BaseExecutor:
         now_time = now_ist.time()
         pfx      = self._cfg_prefix
         today    = now_ist.strftime("%Y-%m-%d")
+        _exp_h   = int(getattr(cfg, "session_expiry_h", 13))
+        _exp_m   = int(getattr(cfg, "session_expiry_m", 30))
+        _now_h, _now_m = now_ist.hour, now_ist.minute
 
         # ── Universal New Day Reset ─────────────────────────────────────────
         if self._eligibility_date and self._eligibility_date != today:
@@ -278,22 +282,25 @@ class BaseExecutor:
             await self._publish_monitor(p, False)
             return
 
-        # ── FORCE CLOSE check ──────────────────────────────────────────────
-        force_time = ist_hm(self._cfg("force_close_h"), self._cfg("force_close_m"))
+        # ── FORCE CLOSE check (session-aware: handles cross-midnight) ─────────
+        _fc_h = int(self._cfg("force_close_h") or 18)
+        _fc_m = int(self._cfg("force_close_m") or 30)
         _has_open_hedge = bool(self.hedge_symbol and self.hedge_qty)
-        if now_time >= force_time:
+        _force_reached = has_reached_session_time(_now_h, _now_m, _fc_h, _fc_m, _exp_h, _exp_m)
+        if _force_reached:
             if self.state in (ExState.MANAGING_POSITION, ExState.PARTIAL_BOOKING):
-                # CRITICAL: Only fire if the position was entered BEFORE today's force_close
-                # time. If entered AFTER (e.g., evening-window trade with a 12:01 force_close),
-                # this is a DIFFERENT session — force_close must NOT fire.
+                # Only fire if the position was entered BEFORE force_close in session order.
+                # Prevents spurious force-close for trades opened after the force_close time
+                # (e.g. evening-window trade with a next-day 04:00 force_close).
                 _should_force = True
                 if self.execution_time_ist:
                     try:
-                        import datetime as _dt
                         _tp = self.execution_time_ist.split(" ")[1]  # "HH:MM:SS"
-                        _h, _m, _s = [int(x) for x in _tp.split(":")]
-                        if _dt.time(_h, _m, _s) >= force_time:
-                            _should_force = False  # position opened after force_close → skip
+                        _eh, _em, _ = [int(x) for x in _tp.split(":")]
+                        # If trade was entered AFTER the force_close point in session order,
+                        # this session's force_close hasn't arrived yet — skip.
+                        if has_reached_session_time(_fc_h, _fc_m, _eh, _em, _exp_h, _exp_m):
+                            _should_force = False
                     except Exception:
                         pass
                 if _should_force:
@@ -301,7 +308,6 @@ class BaseExecutor:
                     return
             elif self.state in (ExState.VERIFY_HEDGE_LOOP, ExState.CHECK_ELIGIBILITY,
                                  ExState.EXECUTE, ExState.WAIT_TRIGGER):
-                # Abort pre-entry checks — window is over, don't enter a new position
                 await self._log(
                     f"Force-close time reached during {self.state.value} — aborting pre-entry, going SLEEP.",
                     level="WARNING"
@@ -310,14 +316,17 @@ class BaseExecutor:
                 await self._save_state()
                 return
             elif self.state == ExState.SLEEP and _has_open_hedge:
-                # Option still held after full futures TP — close it at force_close time
                 await self._do_force_close()
                 return
 
-        # ── Window bounds ───────────────────────────────────────────────────
-        win_start = ist_hm(self._cfg("trade_start_h"), self._cfg("trade_start_m"))
-        win_end   = ist_hm(self._cfg("trade_end_h"),   self._cfg("trade_end_m"))
-        in_window = self.force_window or (win_start <= now_time <= win_end)
+        # ── Window bounds (session-aware: handles cross-midnight) ────────────
+        _ts_h = int(self._cfg("trade_start_h") or 4)
+        _ts_m = int(self._cfg("trade_start_m") or 0)
+        _te_h = int(self._cfg("trade_end_h")   or 18)
+        _te_m = int(self._cfg("trade_end_m")   or 30)
+        in_window = self.force_window or is_in_session_range(
+            _now_h, _now_m, _ts_h, _ts_m, _te_h, _te_m, _exp_h, _exp_m
+        )
 
         # ── SLEEP ────────────────────────────────────────────────────────────
         if self.state == ExState.SLEEP:
@@ -1334,10 +1343,15 @@ class BaseExecutor:
     def _in_window(self) -> bool:
         if self.force_window:
             return True
-        now_t = ist_now().time()
-        return (ist_hm(self._cfg("trade_start_h"), self._cfg("trade_start_m"))
-                <= now_t <=
-                ist_hm(self._cfg("trade_end_h"), self._cfg("trade_end_m")))
+        n = ist_now()
+        exp_h = int(getattr(cfg, "session_expiry_h", 13))
+        exp_m = int(getattr(cfg, "session_expiry_m", 30))
+        return is_in_session_range(
+            n.hour, n.minute,
+            int(self._cfg("trade_start_h") or 4),  int(self._cfg("trade_start_m") or 0),
+            int(self._cfg("trade_end_h")   or 18), int(self._cfg("trade_end_m")   or 30),
+            exp_h, exp_m,
+        )
 
     def _futures_unrealized_pnl(self, exit_price: float, qty: float) -> float:
         entry = self.futures_entry_price
