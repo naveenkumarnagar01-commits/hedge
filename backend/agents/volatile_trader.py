@@ -470,6 +470,18 @@ class VolatileTrader:
 
         self._combined_entry = combined
 
+        # Persist both legs to DB so account history shows them from the start
+        from backend.utils import ist_now_str, utc_now as _utc_now
+        _ts_ist, _ts_utc = ist_now_str(), _utc_now()
+        await store.save_paper_trade(
+            self.name, "VOL_PUT_BUY", put_sym, "BUY", qty, put_ask, 0.0,
+            notes=f"straddle entry — combined={combined:.2f} TP={target:.2f}",
+            ts_ist=_ts_ist, ts_utc=_ts_utc)
+        await store.save_paper_trade(
+            self.name, "VOL_CALL_BUY", call_sym, "BUY", qty, call_ask, 0.0,
+            notes=f"straddle entry — combined={combined:.2f} TP={target:.2f}",
+            ts_ist=_ts_ist, ts_utc=_ts_utc)
+
         self._put_leg = {
             "symbol": put_sym,
             "strike": float(put.get("strike") or 0),
@@ -551,9 +563,11 @@ class VolatileTrader:
             elif not leg["sell_placed"]:
                 target = leg["target"]
                 if bid > 0 and bid >= target:
+                    # Bid already at/above target — fill at actual bid (best real price)
                     await self._sell_leg(leg, bid, "BID≥TP")
-                elif mark > 0 and mark >= target * 1.02:
-                    await self._sell_leg(leg, mark, "MARK≥TP×1.02")
+                elif mark > 0 and mark >= target:
+                    # Mark confirms option is at/above target — simulate limit sell at target
+                    await self._sell_leg(leg, target, "MARK≥TP")
 
         await self._broadcast()
 
@@ -591,14 +605,36 @@ class VolatileTrader:
         leg["close_price"] = price
         leg["close_reason"] = reason
         await self._log(f"SOLD {sym} @ {price:.2f} [{reason}]  PnL: {pnl:+.2f}")
+        from backend.utils import ist_now_str, utc_now as _utc_now
+        await store.save_paper_trade(
+            self.name, "VOL_LEG_SELL", sym, "SELL", qty, price, pnl,
+            notes=f"close reason: {reason}  entry={leg['entry_price']:.2f}",
+            ts_ist=ist_now_str(), ts_utc=_utc_now())
 
     async def _expire_leg(self, leg: dict):
         leg["closed"] = True
         leg["close_price"] = 0.0
         leg["close_reason"] = "EXPIRED"
-        loss = -leg["entry_price"] * leg["qty"]
+        sym = leg["symbol"]
+        qty = leg["qty"]
+        loss = -leg["entry_price"] * qty
         self._session_pnl += loss
-        await self._log(f"EXPIRED {leg['symbol']}  loss: {loss:+.2f}")
+
+        # Remove from paper engine at price 0 so:
+        #   1. Option removed from _option_positions (unrealized_pnl = 0, not -entry_price)
+        #   2. _realized_pnl updated with the full loss
+        #   3. Accounts section shows correct total_pnl (green, not red)
+        if self.is_paper and self._paper:
+            await self._paper.sell_option(sym, qty, 0.0, action="EXPIRED")
+
+        # Save to DB so account history shows the expired trade with full timestamp
+        from backend.utils import ist_now_str, utc_now as _utc_now
+        await store.save_paper_trade(
+            self.name, "EXPIRED", sym, "SELL", qty, 0.0, loss,
+            notes=f"Expired worthless — premium lost ${abs(loss):.2f}",
+            ts_ist=ist_now_str(), ts_utc=_utc_now())
+
+        await self._log(f"EXPIRED {sym}  loss: {loss:+.2f}")
 
     # ─────────────────────────────────────────────────────────────
     # Persistence
