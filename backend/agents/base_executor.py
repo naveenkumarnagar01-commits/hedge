@@ -30,8 +30,9 @@ from backend.message_bus import (
 )
 from backend.config import cfg
 from backend.state_store import store
-from backend.utils import (ist_now, ist_now_str,
-                           is_in_session_range, has_reached_session_time)
+from backend.utils import (ist_now, ist_now_str, get_session_boundaries,
+                           is_in_session_range, has_reached_session_time,
+                           get_session_day)
 
 SET_LINES = "SET_LINES"
 
@@ -111,7 +112,6 @@ class BaseExecutor:
         # Pre-calculated price levels for display (updated on every position change)
         self.partial_trigger_price: float = 0.0  # futures price at which 50% books
         self.full_close_price:      float = 0.0  # approx futures price for full TP
-        self.sl_price:              float = 0.0  # stop-loss level (0 = disabled)
 
         # Session realized PnL — accumulated as each leg closes
         # Persists until daily reset so post-squareoff display shows correct final values
@@ -256,11 +256,15 @@ class BaseExecutor:
         _exp_h   = int(getattr(cfg, "session_expiry_h", 13))
         _exp_m   = int(getattr(cfg, "session_expiry_m", 30))
         _now_h, _now_m = now_ist.hour, now_ist.minute
+        # Session day: same for the entire session window even across midnight.
+        # e.g. June 1 22:10 AND June 2 02:00 both return "2026-06-01" when
+        # the session opened June 1 13:31. Prevents false midnight reset.
+        session_day = get_session_day(now_ist, _exp_h, _exp_m)
 
-        # ── Universal New Day Reset ─────────────────────────────────────────
-        if self._eligibility_date and self._eligibility_date != today:
+        # ── New Session Reset (NOT calendar-day — session-aware) ────────────
+        if self._eligibility_date and self._eligibility_date != session_day:
             if self.state not in (ExState.MANAGING_POSITION, ExState.PARTIAL_BOOKING):
-                await self._log(f"New day detected ({today}). Resetting state to SLEEP.")
+                await self._log(f"New session detected ({session_day}). Resetting state to SLEEP.")
                 await self._reset_daily()
 
         # ── FORCE_CLOSE recovery (crash-recovery guard) ────────────────────
@@ -334,7 +338,7 @@ class BaseExecutor:
             if in_window:
                 # If already determined INELIGIBLE today, stay SLEEP — no re-check
                 # until new day (prevents spam loop SLEEP→CHECK→INELIGIBLE→SLEEP)
-                if self._eligibility_date == today and self.eligible_today is False:
+                if self._eligibility_date == session_day and self.eligible_today is False:
                     await self._publish_monitor(p, in_window)
                     return
                 # If analysis failed (no candle data), wait for retry cooldown
@@ -429,13 +433,15 @@ class BaseExecutor:
         # Guard: only run if still in CHECK_ELIGIBILITY (prevents double-execution race)
         if self.state != ExState.CHECK_ELIGIBILITY:
             return
-        today = ist_now().strftime("%Y-%m-%d")
-        self._eligibility_date = today
+        _exp_h = int(getattr(cfg, "session_expiry_h", 13))
+        _exp_m = int(getattr(cfg, "session_expiry_m", 30))
+        session_day = get_session_day(ist_now(), _exp_h, _exp_m)
+        self._eligibility_date = session_day
         self.zone_price_snap   = price
 
         # ── OB-based analysis (once per session at window open) ──────────────
         today_analyzed = (
-            self.analysis_report.get("analysis_time", "")[:10] == today
+            self.analysis_report.get("analysis_time", "")[:10] == session_day
             and self.analysis_report.get("ob_zone") is not None
             and self.locked_high_line is not None
         )
@@ -464,7 +470,7 @@ class BaseExecutor:
                             f"Ineligible today.",
                             level="WARNING"
                         )
-                    self._eligibility_date = today
+                    self._eligibility_date = session_day
                     self.eligible_today    = False
                     self.locked_high_line  = None
                     self.locked_low_line   = None
@@ -748,30 +754,6 @@ class BaseExecutor:
                 )
                 await self._save_state()
                 await self._broadcast_position()
-                return
-
-        # ── Stop Loss check ──────────────────────────────────────────────────────────
-        sl_pts = float(self._cfg("sl_points") or 0.0)
-        if sl_pts > 0 and self.futures_remaining_qty > 0:
-            sl_hit = (
-                (self.direction == "BULLISH" and price <= self.futures_entry_price - sl_pts) or
-                (self.direction == "BEARISH" and price >= self.futures_entry_price + sl_pts)
-            )
-            if sl_hit:
-                await self._log(
-                    f"STOP LOSS triggered @ {price:.2f}  "
-                    f"entry={self.futures_entry_price:.2f}  SL={sl_pts:.0f}pts  "
-                    f"fut_pnl={fut_pnl:+.2f}",
-                    level="WARNING"
-                )
-                from backend import telegram_alert as tg
-                tg.send(
-                    f"🛑 <b>{self.name} — STOP LOSS HIT</b>\n"
-                    f"Price: ${price:.2f}  Entry: ${self.futures_entry_price:.2f}\n"
-                    f"Futures PnL: <b>${fut_pnl:+.2f}</b>\n"
-                    f"Time: {ist_now_str()}"
-                )
-                await self._do_force_close()
                 return
 
         # ── Full close target (futures only — option stays open until squareoff) ────
@@ -1153,9 +1135,11 @@ class BaseExecutor:
 
             await self._reset_position()
             self.state             = ExState.SLEEP
-            # Block re-entry for the rest of TODAY — force close ends the trading day
-            today = ist_now().strftime("%Y-%m-%d")
-            self._eligibility_date = today
+            # Block re-entry for the rest of this SESSION — force close ends the session
+            _n = ist_now()
+            _eh = int(getattr(cfg, "session_expiry_h", 13))
+            _em = int(getattr(cfg, "session_expiry_m", 30))
+            self._eligibility_date = get_session_day(_n, _eh, _em)
             self.eligible_today    = False
             self.locked_high_line  = None
             self.locked_low_line   = None
@@ -1346,7 +1330,7 @@ class BaseExecutor:
             # Order price levels (for panel display)
             "partial_trigger_price":           self.partial_trigger_price,
             "full_close_price":                self.full_close_price,
-            "sl_price":                        self.sl_price,
+
             "pending_rebuy_price":             self.pending_rebuy_price,
             "pending_rebuy_qty":               self.pending_rebuy_qty,
             # Position timing & zone
@@ -1649,12 +1633,6 @@ class BaseExecutor:
             self.partial_trigger_price = round(E - pnl_partial    / Q, 2)
             self.full_close_price      = round(E - remaining_pnl  / Q, 2)
 
-        sl_pts = float(self._cfg("sl_points") or 0.0)
-        if sl_pts > 0 and E:
-            self.sl_price = round(E - sl_pts if self.direction == "BULLISH" else E + sl_pts, 2)
-        else:
-            self.sl_price = 0.0
-
     async def _reset_daily(self):
         """Reset trigger/loop state for a new day or same-day retry."""
         self.triggered           = False
@@ -1669,11 +1647,14 @@ class BaseExecutor:
         self.locked_low_line     = None
         self.high_line           = None   # clear display lines too
         self.low_line            = None
-        # Preserve today's analysis_report so the panel shows the last known candidates
-        # during the brief gap before fresh analysis overwrites it on same-day retries.
-        # Only clear it when the day has actually changed (stale data from yesterday).
-        today = ist_now().strftime("%Y-%m-%d")
-        if self.analysis_report.get("analysis_time", "")[:10] != today:
+        # Preserve analysis_report within the same session so the panel still shows
+        # the last known OB zone during brief gaps between retries.
+        # Only wipe it when the SESSION changes (not at calendar midnight).
+        _n = ist_now()
+        _eh = int(getattr(cfg, "session_expiry_h", 13))
+        _em = int(getattr(cfg, "session_expiry_m", 30))
+        _sday = get_session_day(_n, _eh, _em)
+        if self.analysis_report.get("analysis_time", "")[:10] != _sday:
             self.analysis_report = {}
         self._eligibility_date   = ""
         self.eligible_today      = None
@@ -1794,7 +1775,6 @@ class BaseExecutor:
             self.pending_rebuy_qty         = s.get("pending_rebuy_qty", 0.0)
             self.partial_trigger_price     = s.get("partial_trigger_price", 0.0)
             self.full_close_price          = s.get("full_close_price", 0.0)
-            self.sl_price                  = s.get("sl_price", 0.0)
             self.session_realized_futures_pnl = s.get("session_realized_futures_pnl", 0.0)
             self.session_realized_hedge_pnl   = s.get("session_realized_hedge_pnl", 0.0)
             self.session_start_ts             = s.get("session_start_ts", 0.0)

@@ -54,7 +54,6 @@ class Config:
     # Profit management
     bull_partial_profit_ratio:   float = 1.10     # trigger 50% futures sell at premium × ratio
     bull_session_pnl_target:     float = 600.0    # total futures PnL target for session (USDT)
-    bull_sl_points:              float = 500.0    # stop loss: close if price drops this many pts from entry (0 = disabled)
 
     # Legacy alias kept so old DB configs restore without KeyError
     bull_n_hours:                float = 2.0
@@ -86,7 +85,6 @@ class Config:
 
     bear_partial_profit_ratio:   float = 1.10
     bear_session_pnl_target:     float = 600.0
-    bear_sl_points:              float = 500.0    # stop loss: close if price rises this many pts from entry (0 = disabled)
 
     bear_n_hours:                float = 2.0
     bear_n_points:               float = 150.0
@@ -134,8 +132,6 @@ class Config:
     vol_combined_premium_max:    float = 800.0   # max (put_ask + call_ask) to enter
     vol_tp_multiplier:           float = 1.10    # TP = combined_entry × multiplier
     vol_min_ask_qty:             float = 1.0     # min ask_qty on each leg for instant fill
-    vol_sl_pct:                  float = 0.15    # cut losing leg when mark drops to X% of entry (0=disabled)
-    vol_close_other_on_tp:       bool  = True    # close the other leg at market when one leg hits TP
     vol_strike_gap:              float = 500.0   # required PUT_strike − CALL_strike distance (pts)
     vol_strike_gap_tolerance:    float = 50.0    # ± tolerance on strike gap (pts)
     vol_window_close_h:          int   = 6       # search window closes at this hour IST (next day)

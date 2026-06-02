@@ -234,7 +234,11 @@ class PaperEngine:
 
     async def sell_option(self, symbol: str, qty: float, bid_price: float,
                           action: str = "OPTION_SELL") -> dict:
-        fill_price = self._option_bid(symbol) or bid_price or 0
+        # Use the specified price directly (limit order simulation).
+        # bid_price = 0 means "market" — fall back to chain bid.
+        # This ensures limit sells fill at exactly the requested price (e.g. TP target),
+        # not at whatever chain bid happens to be at execution time.
+        fill_price = bid_price if bid_price > 0 else (self._option_bid(symbol) or 0)
         proceeds   = fill_price * qty
         self.balance += proceeds
         exec_tag = self.executor or "default"

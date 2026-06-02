@@ -50,6 +50,14 @@ def is_time_before_in_session(h1: int, m1: int, h2: int, m2: int, expiry_h: int,
 def is_time_before_or_equal_in_session(h1: int, m1: int, h2: int, m2: int, expiry_h: int, expiry_m: int) -> bool:
     return _session_minutes(h1, m1, expiry_h, expiry_m) <= _session_minutes(h2, m2, expiry_h, expiry_m)
 
+def get_session_day(now_ist: datetime.datetime, expiry_h: int, expiry_m: int) -> str:
+    """Return the session-start date as 'YYYY-MM-DD'.
+    Within any cross-midnight session (e.g. June 1 13:31 → June 2 13:30),
+    every timestamp returns '2026-06-01' (the day the session opened).
+    This prevents the false 'new day' reset at calendar midnight."""
+    session_start, _ = get_session_boundaries(now_ist, expiry_h, expiry_m)
+    return session_start.strftime("%Y-%m-%d")
+
 def is_in_session_range(now_h: int, now_m: int, start_h: int, start_m: int,
                          end_h: int, end_m: int, expiry_h: int, expiry_m: int) -> bool:
     """True if now is within [start, end] using session-relative ordering.
