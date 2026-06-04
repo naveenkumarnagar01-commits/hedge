@@ -79,12 +79,19 @@ class WSConnection:
 
     async def _connect(self):
         import websockets
+        import ssl
         log.info(f"[{self.name}] Connecting -> {self.url}")
+        
+        ssl_context = ssl.create_default_context()
+        ssl_context.check_hostname = False
+        ssl_context.verify_mode = ssl.CERT_NONE
+
         async with websockets.connect(
             self.url,
             ping_interval=20,
             ping_timeout=15,
             close_timeout=5,
+            ssl=ssl_context,
         ) as ws:
             self._ws = ws
             self._status = "ok"

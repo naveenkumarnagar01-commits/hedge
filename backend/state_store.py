@@ -106,7 +106,7 @@ class StateStore:
     # ── Connection ─────────────────────────────────────────────────────────
 
     async def connect(self, dsn: str = ""):
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         if dsn and dsn.startswith("postgresql"):
             try:
                 import asyncpg
@@ -118,7 +118,15 @@ class StateStore:
             except Exception as e:
                 log.warning(f"PostgreSQL unavailable ({e}) — using SQLite.")
 
-        self._db_path = "hedge_state.db"
+        # Use env var DB_PATH if set, otherwise absolute path next to this file
+        # so the DB is found regardless of which directory the server starts from.
+        import os as _os
+        default_db = _os.path.join(
+            _os.path.dirname(_os.path.abspath(__file__)), "..", "hedge_state.db"
+        )
+        self._db_path = _os.path.abspath(
+            _os.environ.get("DB_PATH", default_db)
+        )
         await loop.run_in_executor(_pool, self._sqlite_init)
         await loop.run_in_executor(_pool, self._sqlite_load_all)
         log.info(f"SQLite state store ready: {self._db_path}")
@@ -154,7 +162,7 @@ class StateStore:
 
     async def set(self, key: str, value: Any):
         self._cache[key] = value
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         if self._pg_pool:
             try:
                 await self._pg_write(key, value)
@@ -204,7 +212,7 @@ class StateStore:
             "pnl": pnl, "notes": notes,
         }
         if self._db_path:
-            loop = asyncio.get_event_loop()
+            loop = asyncio.get_running_loop()
             try:
                 await loop.run_in_executor(_pool, self._sqlite_insert_paper_trade, row)
             except Exception as e:
@@ -223,7 +231,7 @@ class StateStore:
     async def get_paper_trades(self, trader_name: str, limit: int = 200) -> list:
         if not self._db_path:
             return []
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         try:
             return await loop.run_in_executor(_pool, self._sqlite_get_paper_trades,
                                               trader_name, limit)
@@ -267,7 +275,7 @@ class StateStore:
             **kwargs,
         }
         if self._db_path:
-            loop = asyncio.get_event_loop()
+            loop = asyncio.get_running_loop()
             try:
                 await loop.run_in_executor(_pool, self._sqlite_upsert_session, row)
             except Exception as e:
@@ -285,7 +293,7 @@ class StateStore:
     async def get_sessions(self, trader_name: str, limit: int = 50) -> list:
         if not self._db_path:
             return []
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         try:
             return await loop.run_in_executor(_pool, self._sqlite_get_sessions,
                                               trader_name, limit)
@@ -319,7 +327,7 @@ class StateStore:
 
     async def get_sessions_filtered(self, trader_name: str, from_date: str = "", to_date: str = "", limit: int = 100, exclude_force_closed: bool = True) -> list:
         if not self._db_path: return []
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         try:
             return await loop.run_in_executor(_pool, self._sqlite_get_sessions_filtered, trader_name, from_date, to_date, limit, exclude_force_closed)
         except Exception:
@@ -333,7 +341,7 @@ class StateStore:
 
     async def get_trades_by_session(self, session_id: str) -> list:
         if not self._db_path: return []
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         try:
             return await loop.run_in_executor(_pool, self._sqlite_get_trades_by_session, session_id)
         except Exception:
@@ -345,10 +353,12 @@ class StateStore:
         with sqlite3.connect(self._db_path) as c:
             c.execute("DELETE FROM paper_trades WHERE trader_name=?", (trader_name,))
             c.execute("DELETE FROM trading_sessions WHERE trader_name=?", (trader_name,))
+            # Also wipe persisted executor state so it doesn't reload stale PnL on restart
+            c.execute("DELETE FROM kv_state WHERE key=?", (f"{trader_name}_state",))
 
     async def delete_trader_history(self, trader_name: str):
         if not self._db_path: return
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         try:
             await loop.run_in_executor(_pool, self._sqlite_delete_trader_history, trader_name)
             # Also remove from kv_state cache for this trader
@@ -367,7 +377,7 @@ class StateStore:
 
     async def mark_session_force_closed(self, session_id: str):
         if not self._db_path or not session_id: return
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         try:
             await loop.run_in_executor(_pool, self._sqlite_mark_force_closed, session_id)
         except Exception as e:
@@ -388,7 +398,7 @@ class StateStore:
 
     async def save_trader_config(self, trader_name: str, config: dict):
         if self._db_path:
-            loop = asyncio.get_event_loop()
+            loop = asyncio.get_running_loop()
             try:
                 await loop.run_in_executor(_pool, self._sqlite_save_trader_cfg,
                                            trader_name, config)
@@ -406,7 +416,7 @@ class StateStore:
     async def get_trader_config(self, trader_name: str) -> Optional[dict]:
         if not self._db_path:
             return None
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         try:
             return await loop.run_in_executor(_pool, self._sqlite_get_trader_cfg, trader_name)
         except Exception as e:
@@ -440,7 +450,7 @@ class StateStore:
             "side": side, "qty": qty, "price": price, "pnl": pnl,
             "status": status, "detail": detail or {}, "is_paper": is_paper,
         }
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         if self._db_path:
             try:
                 await loop.run_in_executor(_pool, self._sqlite_log_trade_legacy, row)
@@ -451,7 +461,7 @@ class StateStore:
     async def get_recent_trades(self, limit: int = 200, is_paper: bool = True) -> list:
         if not self._db_path:
             return []
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         try:
             def _q():
                 with sqlite3.connect(self._db_path) as c:

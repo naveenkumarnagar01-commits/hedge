@@ -1,8 +1,7 @@
 """
 Volatile Event Trader — options-only straddle strategy.
 
-Flow:
-  SLEEP → (event time reached) → SEARCHING → EXECUTING → MANAGING → DONE
+ul  SLEEP → (event time reached) → SEARCHING → EXECUTING → MANAGING → DONE
 
 Rules:
   - Strict ITM pair: PUT_strike > spot > CALL_strike
@@ -72,8 +71,10 @@ class VolatileTrader:
 
         # Current mark/futures price
         self._mark: float = 0.0
-
-        self._restore()
+        self._step_running: bool = False
+        self._closing_session: bool = False
+        # _restore() is intentionally NOT called here — store is not yet connected
+        # at __init__ time. It is called in start() after store.connect() runs.
 
     # ─────────────────────────────────────────────────────────────
     # Event management (persisted to DB)
@@ -166,6 +167,31 @@ class VolatileTrader:
             return
         self._running = True
         bus.subscribe(TICK_FUTURES, self._on_tick)
+
+        # ── Crash recovery (store is connected by the time start() is called) ──
+        self._restore()
+
+        # ── Restore paper engine balance + positions from DB ──────────────────
+        if self._paper is not None:
+            state_key = getattr(self._paper, "_state_key", "paper_engine_state_vol")
+            self._paper.load_state(state_key)
+
+            # If trader is SLEEP (no active trade), wipe any stale paper positions
+            # that may have been left from a previous crash mid-trade.
+            _active = {VState.MANAGING, VState.EXECUTING, VState.SEARCHING}
+            if self._state not in _active:
+                self._paper.clear_executor_positions(self.name)
+                await self._paper.save_state()
+                log.info(f"{self.name}: cleared stale paper positions (state=SLEEP)")
+
+        # ── Handle option expired while server was offline ────────────────────
+        for leg in (self._put_leg, self._call_leg):
+            if leg and not leg.get("closed") and self._is_option_expired(leg["symbol"]):
+                log.warning(
+                    f"{self.name}: {leg['symbol']} expired while offline — recording loss"
+                )
+                await self._expire_leg(leg)
+
         await self._log("Trader started")
 
     async def stop(self):
@@ -188,21 +214,37 @@ class VolatileTrader:
 
     async def force_close(self):
         """Sell all open legs at current bid, then reset to SLEEP."""
+        if self._closing_session:
+            return
+        self._closing_session = True
         # Capture event id before reset clears it
         _evt_id = (self._active_event or {}).get("id", "")
         if self._state == VState.MANAGING:
             for leg in (self._put_leg, self._call_leg):
-                if leg is not None and not leg.get("closed"):
+                if leg is not None and not leg.get("closed") and not leg.get("sell_placed"):
                     bid = leg.get("live", {}).get("bid", 0)
                     if bid <= 0:
                         bid = leg.get("entry_price", 0) * 0.9
                     await self._sell_leg(leg, bid, "FORCE_CLOSE")
+            if self.is_paper and self._paper:
+                await self._paper.save_state()
+        # Record final PnL before reset() clears _session_pnl
+        if _evt_id:
+            from backend.utils import ist_now_str as _isn
+            await store.save_session(
+                session_id=f"vol_{_evt_id}", trader_name=self.name,
+                total_pnl=self._session_pnl,
+                close_ts_ist=_isn(), status="closed",
+            )
         self.reset()
+        await self._save_state()
         # Mark any active session as force-closed (don't record in journal)
         if _evt_id:
             from backend.state_store import store as _store
             await _store.mark_session_force_closed(f"vol_{_evt_id}")
+        await self._save_state()
         await self._broadcast()
+        self._closing_session = False
 
     async def clear_memory(self):
         """Wipe state without sending any orders. Clears all history and resets balance."""
@@ -221,6 +263,7 @@ class VolatileTrader:
             await self._paper.reset()
         self._session_pnl = 0.0
         self._logs = []
+        await self._save_state()
 
     # ─────────────────────────────────────────────────────────────
     # Tick handler
@@ -233,7 +276,13 @@ class VolatileTrader:
         price = float(data.get("mark_price") or data.get("price") or self._mark)
         if price > 0:
             self._mark = price
-        await self._step()
+        if self._step_running:
+            return
+        self._step_running = True
+        try:
+            await self._step()
+        finally:
+            self._step_running = False
 
     # ─────────────────────────────────────────────────────────────
     # State machine
@@ -250,12 +299,40 @@ class VolatileTrader:
                 await self._log("Search window closed — returning to SLEEP")
                 self._state = VState.SLEEP
                 self._active_event = None
+                await self._save_state()
                 await self._broadcast()
                 return
             if self._mark > 0:
                 await self._search_entry(self._mark)
 
         elif self._state == VState.MANAGING:
+            # Auto-squareoff: force-close all legs when configured time is reached.
+            # Guard: if the active event started AFTER force_close in session order,
+            # force_close already passed before this trade — don't auto-close.
+            from backend.utils import has_reached_session_time, _session_minutes
+            fc_h = int(getattr(cfg, "vol_force_close_h", 18))
+            fc_m = int(getattr(cfg, "vol_force_close_m", 30))
+            exp_h = int(getattr(cfg, "session_expiry_h", 13))
+            exp_m = int(getattr(cfg, "session_expiry_m", 30))
+            if has_reached_session_time(now.hour, now.minute, fc_h, fc_m, exp_h, exp_m):
+                _skip_fc = False
+                try:
+                    evt_str = (self._active_event or {}).get("event_time", "")
+                    et = datetime.fromisoformat(evt_str)
+                    if et.tzinfo is None:
+                        et = et.replace(tzinfo=_IST)
+                    # If event occurred after force_close in session order → fc already stale
+                    _skip_fc = _session_minutes(et.hour, et.minute, exp_h, exp_m) > \
+                                _session_minutes(fc_h, fc_m, exp_h, exp_m)
+                except Exception:
+                    pass
+                if not _skip_fc:
+                    await self._log(
+                        f"Auto-squareoff: force_close time {fc_h:02d}:{fc_m:02d} IST reached — closing all legs",
+                        "WARNING",
+                    )
+                    await self.force_close()
+                    return
             await self._monitor_legs()
 
         elif self._state == VState.DONE:
@@ -273,6 +350,8 @@ class VolatileTrader:
 
         events = store.get(self.EVENTS_KEY) or []
         for e in events:
+            if e.get("traded"):  # already executed once — never re-activate
+                continue
             try:
                 et = datetime.fromisoformat(e["event_time"])
                 if et.tzinfo is None:
@@ -288,6 +367,7 @@ class VolatileTrader:
                     "window_close": wc.strftime("%Y-%m-%dT%H:%M"),
                 }
                 self._state = VState.SEARCHING
+                await self._save_state()
                 await self._log(
                     f"Window open for '{e['name']}' — "
                     f"searching until {wc.strftime('%d %b %H:%M IST')}"
@@ -328,6 +408,7 @@ class VolatileTrader:
     async def _search_entry(self, spot: float):
         result = self._find_strict_itm_pair(spot)
         if result is None:
+            await self._save_state()
             await self._broadcast()
             return
 
@@ -462,8 +543,11 @@ class VolatileTrader:
         call_sym = call.get("symbol", "")
 
         if self.is_paper and self._paper:
+            self._paper.executor = self.name
             await self._paper.buy_option(put_sym, qty, put_ask, action="VOL_PUT_BUY")
+            self._paper.executor = self.name
             await self._paper.buy_option(call_sym, qty, call_ask, action="VOL_CALL_BUY")
+            await self._paper.save_state()
         else:
             await self._live_buy(put_sym, qty, put_ask)
             await self._live_buy(call_sym, qty, call_ask)
@@ -473,14 +557,15 @@ class VolatileTrader:
         # Persist both legs to DB so account history shows them from the start
         from backend.utils import ist_now_str, utc_now as _utc_now
         _ts_ist, _ts_utc = ist_now_str(), _utc_now()
+        evt_id = (self._active_event or {}).get("id", "")
         await store.save_paper_trade(
             self.name, "VOL_PUT_BUY", put_sym, "BUY", qty, put_ask, 0.0,
             notes=f"straddle entry — combined={combined:.2f} TP={target:.2f}",
-            ts_ist=_ts_ist, ts_utc=_ts_utc)
+            ts_ist=_ts_ist, ts_utc=_ts_utc, session_id=f"vol_{evt_id}")
         await store.save_paper_trade(
             self.name, "VOL_CALL_BUY", call_sym, "BUY", qty, call_ask, 0.0,
             notes=f"straddle entry — combined={combined:.2f} TP={target:.2f}",
-            ts_ist=_ts_ist, ts_utc=_ts_utc)
+            ts_ist=_ts_ist, ts_utc=_ts_utc, session_id=f"vol_{evt_id}")
 
         self._put_leg = {
             "symbol": put_sym,
@@ -513,6 +598,22 @@ class VolatileTrader:
             f"combined={combined:.2f}  TP each @ {target:.2f}"
         )
         self._state = VState.MANAGING
+
+        evt_id = (self._active_event or {}).get("id", "")
+        if evt_id:
+            await store.save_session(
+                session_id=f"vol_{evt_id}", trader_name=self.name,
+                entry_ts_ist=_ts_ist, status="open",
+            )
+            # Mark event as traded so it is never re-activated after a reset
+            events = store.get(self.EVENTS_KEY) or []
+            for ev in events:
+                if ev.get("id") == evt_id:
+                    ev["traded"] = True
+                    break
+            await store.set(self.EVENTS_KEY, events)
+
+        await self._save_state()
         await self._broadcast()
 
     async def _live_buy(self, symbol: str, qty: float, ask: float):
@@ -529,6 +630,28 @@ class VolatileTrader:
     # ─────────────────────────────────────────────────────────────
     # Position management
     # ─────────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _is_option_expired(symbol: str) -> bool:
+        """
+        Parse the YYMMDD from an option symbol (e.g. BTC-260603-67500-C)
+        and return True if current IST time is past 13:30 IST on that date.
+        This catches expired options even when the options feed has rolled
+        to the next day's chain after a server restart.
+        """
+        try:
+            parts = symbol.split("-")  # ['BTC', '260603', '67500', 'C']
+            if len(parts) < 4:
+                return False
+            ds = parts[1]  # '260603' → YYMMDD
+            yy, mm, dd = int(ds[0:2]), int(ds[2:4]), int(ds[4:6])
+            expiry = datetime.now(_IST).replace(
+                year=2000 + yy, month=mm, day=dd,
+                hour=13, minute=30, second=0, microsecond=0
+            )
+            return datetime.now(_IST) > expiry
+        except Exception:
+            return False
 
     async def _monitor_legs(self):
         expiry_ms = None
@@ -558,9 +681,11 @@ class VolatileTrader:
                 bid = 0.0
                 mark = 0.0
 
-            if past_expiry:
+            # Check expiry: either the feed says past expiry, OR the symbol
+            # itself has a date that's already passed (catches restart edge-case)
+            if past_expiry or self._is_option_expired(leg["symbol"]):
                 await self._expire_leg(leg)
-            elif not leg["sell_placed"]:
+            elif not leg.get("sell_placed"):
                 target = leg["target"]
                 if bid > 0 and bid >= target:
                     await self._sell_leg(leg, bid, "BID≥TP")
@@ -573,15 +698,34 @@ class VolatileTrader:
                 self._put_leg["closed"] and self._call_leg["closed"]):
             self._state = VState.DONE
             await self._log(f"All legs closed — session PnL: {self._session_pnl:+.2f} USDT")
+            evt_id = (self._active_event or {}).get("id", "")
+            if evt_id:
+                from backend.utils import ist_now_str as _isn
+                await store.save_session(
+                    session_id=f"vol_{evt_id}", trader_name=self.name,
+                    total_pnl=self._session_pnl,
+                    close_ts_ist=_isn(), status="closed",
+                )
+            await self._save_state()
             await self._broadcast()
 
     async def _sell_leg(self, leg: dict, price: float, reason: str):
+        if not leg or leg.get("closed") or leg.get("sell_placed"):
+            return False
         leg["sell_placed"] = True
         sym = leg["symbol"]
         qty = leg["qty"]
+        await self._save_state()
 
         if self.is_paper and self._paper:
-            await self._paper.sell_option(sym, qty, price, action="VOL_LEG_SELL")
+            self._paper.executor = self.name
+            fill = await self._paper.sell_option(sym, qty, price, action="VOL_LEG_SELL")
+            if not fill or not fill.get("filled"):
+                leg["sell_placed"] = False
+                await self._save_state()
+                await self._log(f"Sell skipped: no open paper position for {sym}", "WARNING")
+                return False
+            await self._paper.save_state()
         else:
             try:
                 from backend.execution.binance_client import client
@@ -591,10 +735,12 @@ class VolatileTrader:
                 if not fill or not fill.get("filled"):
                     await self._log(f"Sell not filled: {sym}", "WARNING")
                     leg["sell_placed"] = False
+                    await self._save_state()
                     return
             except Exception as exc:
                 await self._log(f"Sell error {sym}: {exc}", "ERROR")
                 leg["sell_placed"] = False
+                await self._save_state()
                 return
 
         pnl = (price - leg["entry_price"]) * qty
@@ -604,12 +750,19 @@ class VolatileTrader:
         leg["close_reason"] = reason
         await self._log(f"SOLD {sym} @ {price:.2f} [{reason}]  PnL: {pnl:+.2f}")
         from backend.utils import ist_now_str, utc_now as _utc_now
+        evt_id = (self._active_event or {}).get("id", "")
         await store.save_paper_trade(
             self.name, "VOL_LEG_SELL", sym, "SELL", qty, price, pnl,
             notes=f"close reason: {reason}  entry={leg['entry_price']:.2f}",
-            ts_ist=ist_now_str(), ts_utc=_utc_now())
+            ts_ist=ist_now_str(), ts_utc=_utc_now(), session_id=f"vol_{evt_id}")
+        await self._save_state()
+        return True
 
     async def _expire_leg(self, leg: dict):
+        if not leg or leg.get("closed"):
+            return
+        leg["sell_placed"] = True
+        await self._save_state()
         leg["closed"] = True
         leg["close_price"] = 0.0
         leg["close_reason"] = "EXPIRED"
@@ -623,16 +776,27 @@ class VolatileTrader:
         #   2. _realized_pnl updated with the full loss
         #   3. Accounts section shows correct total_pnl (green, not red)
         if self.is_paper and self._paper:
-            await self._paper.sell_option(sym, qty, 0.0, action="EXPIRED")
+            self._paper.executor = self.name
+            fill = await self._paper.sell_option(sym, qty, 0.0, action="EXPIRED")
+            if fill:
+                await self._paper.save_state()
+            else:
+                self._session_pnl -= loss
+                leg["close_reason"] = "STALE_NO_POSITION"
+                await self._log(f"Expired leg skipped: no open paper position for {sym}", "WARNING")
+                await self._save_state()
+                return
 
         # Save to DB so account history shows the expired trade with full timestamp
         from backend.utils import ist_now_str, utc_now as _utc_now
+        evt_id = (self._active_event or {}).get("id", "")
         await store.save_paper_trade(
             self.name, "EXPIRED", sym, "SELL", qty, 0.0, loss,
             notes=f"Expired worthless — premium lost ${abs(loss):.2f}",
-            ts_ist=ist_now_str(), ts_utc=_utc_now())
+            ts_ist=ist_now_str(), ts_utc=_utc_now(), session_id=f"vol_{evt_id}")
 
         await self._log(f"EXPIRED {sym}  loss: {loss:+.2f}")
+        await self._save_state()
 
     # ─────────────────────────────────────────────────────────────
     # Persistence
@@ -664,6 +828,9 @@ class VolatileTrader:
         except Exception as exc:
             log.warning(f"{self.name}: restore failed: {exc}")
 
+    async def _save_state(self):
+        await store.set(f"{self.name}_state", self._serialize())
+
     # ─────────────────────────────────────────────────────────────
     # Status / broadcast
     # ─────────────────────────────────────────────────────────────
@@ -672,9 +839,9 @@ class VolatileTrader:
         unrealized = 0.0
         for leg in (self._put_leg, self._call_leg):
             if leg and not leg["closed"]:
-                bid = leg["live"].get("bid", 0.0)
-                if bid > 0:
-                    unrealized += (bid - leg["entry_price"]) * leg["qty"]
+                mark = leg["live"].get("mark", 0.0)
+                if mark > 0:
+                    unrealized += (mark - leg["entry_price"]) * leg["qty"]
 
         return {
             "executor": self.name,

@@ -66,27 +66,30 @@ volatile = VolatileTrader( is_paper=True, paper_engine=_vol_paper)
 
 async def _squareoff_broadcaster(executor, h_key: str, m_key: str):
     """
-    Fires SQUAREOFF_START for one executor at its configured force-close time daily.
-    Runs as two independent tasks — one for bull, one for bear.
+    Fires SQUAREOFF_START for bull/bear at their configured force-close time.
+    Uses wall-clock sleep (safe for bull/bear whose windows are within a single
+    calendar day). VolatileTrader handles its own squareoff inside _step().
     """
     from backend.message_bus import SQUAREOFF_START
     from datetime import timedelta
     name = executor.name
     while True:
         try:
-            now_ist  = ist_now()
-            sq_h = getattr(cfg, h_key)
-            sq_m = getattr(cfg, m_key)
+            now_ist = ist_now()
+            sq_h    = int(getattr(cfg, h_key) or 0)   # int() — never falsy-0 issue
+            sq_m    = int(getattr(cfg, m_key) or 0)
             sq_time = now_ist.replace(hour=sq_h, minute=sq_m, second=0, microsecond=0)
             if now_ist >= sq_time:
                 sq_time += timedelta(days=1)
             wait_sec = (sq_time - now_ist).total_seconds()
+            # Clamp: always wait at least 60s to prevent tight-loop on bad config
+            wait_sec = max(wait_sec, 60)
             log.info(f"[{name}] Squareoff in {wait_sec/3600:.2f}h at {sq_time.strftime('%H:%M')} IST")
             await asyncio.sleep(wait_sec)
             log.info(f"[{name}] Broadcasting SQUAREOFF_START")
             await bus.publish(SQUAREOFF_START, {"ts_ist": ist_now_str(), "executor": name}, source="main")
         except asyncio.CancelledError:
-            raise  # let task cancellation propagate normally
+            raise
         except Exception as e:
             log.error(f"[{name}] Squareoff broadcaster error: {e} — retrying in 60s")
             await asyncio.sleep(60)
@@ -155,9 +158,9 @@ async def startup():
     log.info("All 3 traders started.")
 
     # 6. Background tasks
-    asyncio.create_task(_squareoff_broadcaster(bullish,  "bull_force_close_h", "bull_force_close_m"))
-    asyncio.create_task(_squareoff_broadcaster(bearish,  "bear_force_close_h", "bear_force_close_m"))
-    asyncio.create_task(_squareoff_broadcaster(volatile, "vol_force_close_h",  "vol_force_close_m"))
+    asyncio.create_task(_squareoff_broadcaster(bullish, "bull_force_close_h", "bull_force_close_m"))
+    asyncio.create_task(_squareoff_broadcaster(bearish, "bear_force_close_h", "bear_force_close_m"))
+    # NOTE: VolatileTrader manages its own squareoff inside _step() — no broadcaster needed
     asyncio.create_task(_state_persister())
 
     log.info("System fully online.")

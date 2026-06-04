@@ -238,20 +238,33 @@ class PaperEngine:
         # bid_price = 0 means "market" — fall back to chain bid.
         # This ensures limit sells fill at exactly the requested price (e.g. TP target),
         # not at whatever chain bid happens to be at execution time.
-        fill_price = bid_price if bid_price > 0 else (self._option_bid(symbol) or 0)
-        proceeds   = fill_price * qty
-        self.balance += proceeds
         exec_tag = self.executor or "default"
         opt_key  = f"{symbol}::{exec_tag}"
-        pos = self._option_positions.pop(opt_key, {})
-        pnl = (fill_price - pos.get("avg_price", 0)) * qty
+        pos = self._option_positions.get(opt_key)
+        if not pos or float(pos.get("qty", 0) or 0) <= 0:
+            log.warning(
+                f"Ignoring option sell with no open position: executor={exec_tag} "
+                f"symbol={symbol} action={action}"
+            )
+            return {}
+        close_qty = min(float(qty), float(pos.get("qty", 0) or 0))
+        fill_price = 0.0 if action in ("EXPIRED", "EXPIRED_AT_STARTUP") else (
+            bid_price if bid_price > 0 else (self._option_bid(symbol) or 0)
+        )
+        proceeds   = fill_price * close_qty
+        self.balance += proceeds
+        pnl = (fill_price - pos.get("avg_price", 0)) * close_qty
         self._realized_pnl += pnl          # option sold → realized
+        pos["qty"] = float(pos.get("qty", 0) or 0) - close_qty
+        if pos["qty"] <= 1e-8:
+            self._option_positions.pop(opt_key, None)
+
         row = {
             "ts_ist":    ist_now_str(),
             "action":    action,
             "symbol":    symbol,
             "side":      "SELL",
-            "qty":       qty,
+            "qty":       close_qty,
             "fill_price":fill_price,
             "pnl":       round(pnl, 2),
             "is_paper":  True,
@@ -260,7 +273,7 @@ class PaperEngine:
         self.trade_history.append(row)
         self._snapshot_equity()
         return {"order_id": f"paper_opt_{int(time.time()*1000)}",
-                "avg_price": fill_price, "qty": qty, "filled": True}
+                "avg_price": fill_price, "qty": close_qty, "filled": True}
 
     # ── Equity snapshot ───────────────────────────────────────────────────
 
@@ -307,9 +320,17 @@ class PaperEngine:
         })
         if len(self.equity_curve) > 10_000:
             self.equity_curve = self.equity_curve[-10_000:]
-        # Persist after every trade so state survives restarts
+        # Persist after every trade so state survives restarts.
+        # Wrap in a helper so save failures are logged, not silently dropped.
         import asyncio
-        asyncio.create_task(self.save_state())
+
+        async def _safe_save():
+            try:
+                await self.save_state()
+            except Exception as _e:
+                log.error(f"Paper engine state save failed: {_e}")
+
+        asyncio.create_task(_safe_save())
 
     # ── Summary ───────────────────────────────────────────────────────────
 
@@ -331,19 +352,26 @@ class PaperEngine:
         opt_cost          = self._option_cost_deployed()   # what was paid
         opt_mtm           = opt_current_value - opt_cost   # change from cost
 
-        # ── Core accounting ─────────────────────────────────────────────────
-        # equity = cash + current option value + futures MTM
-        # (balance already has option cost deducted, so we add back current value)
+        # ── Core accounting (Binance-style) ─────────────────────────────────
+        # equity = cash + current option market value + futures MTM
+        # (balance already has option cost deducted, so full value is added back)
         equity       = round(self.balance + opt_current_value + futures_mtm, 2)
 
-        # unrealized = how much open positions have moved from entry (shown to user)
-        unrealized   = round(opt_mtm + futures_mtm, 2)
+        # unrealized = equity - balance  →  always satisfies: Equity = Balance + Unrealized
+        # This represents: "current market value of all open positions"
+        # (opt_current_value + futures_mtm, not just the change from cost)
+        unrealized   = round(equity - self.balance, 2)
 
-        # realized = only from CLOSED positions (option sells + closed futures)
-        realized_pnl = round(self._realized_pnl, 2)
+        # open_pnl = how much open positions have moved from entry cost (P&L perspective)
+        # This is the "MTM change": negative when option lost value, positive when gained
+        open_pnl     = round(opt_mtm + futures_mtm, 2)
 
-        # total = full picture = realized + unrealized = equity - start
+        # total = full picture = equity - start (includes everything: realized + open MTM)
         total_pnl    = round(equity - start, 2)
+
+        # realized = total_pnl − open_pnl  →  always: Total PnL = Realized + Open PnL
+        # Binance identity: all P/L is either realized (closed) or open (change from cost)
+        realized_pnl = round(total_pnl - open_pnl, 2)
 
         # session_pnl = intraday reference (equity vs window-open balance)
         session_pnl  = round(equity - self.session_start_balance, 2)
@@ -351,6 +379,7 @@ class PaperEngine:
         return {
             "balance":          round(self.balance, 2),
             "unrealized_pnl":   unrealized,
+            "open_pnl":         open_pnl,
             "equity":           equity,
             "total_pnl":        total_pnl,
             "realized_pnl":     realized_pnl,

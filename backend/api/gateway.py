@@ -52,6 +52,49 @@ _clients: Set[WebSocket] = set()
 _event_buffer: list = []
 _MAX_BUFFER = 500
 
+_TRADER_EXECUTOR_NAMES = {
+    "bull": "BullishExecutor_Paper",
+    "bear": "BearishExecutor_Paper",
+    "vol":  "VolatileTrader_Paper",
+}
+
+
+async def _ledger_closed_pnl(executor_name: str) -> float | None:
+    if not executor_name:
+        return None
+    trades = await store.get_paper_trades(executor_name, 10000)
+    if not trades:
+        return None
+    return round(sum(float(t.get("pnl") or 0.0) for t in trades), 2)
+
+
+async def _reconcile_flat_summary(trader_key: str, summary: dict, paper_engine=None) -> dict:
+    """When an account is flat, the persistent trade ledger is authoritative."""
+    has_open = bool(summary.get("open_positions")) or bool(summary.get("option_positions"))
+    if has_open:
+        return summary
+    ledger_pnl = await _ledger_closed_pnl(_TRADER_EXECUTOR_NAMES.get(trader_key, ""))
+    if ledger_pnl is None:
+        return summary
+    if abs(ledger_pnl - float(summary.get("total_pnl") or 0.0)) <= 0.01:
+        return summary
+    fixed = dict(summary)
+    start = float(summary.get("starting_balance") or cfg.virtual_balance_usdt)
+    fixed["balance"] = round(start + ledger_pnl, 2)
+    fixed["equity"] = fixed["balance"]
+    fixed["unrealized_pnl"] = 0.0
+    fixed["open_pnl"] = 0.0
+    fixed["total_pnl"] = ledger_pnl
+    fixed["realized_pnl"] = ledger_pnl
+    fixed["session_pnl"] = ledger_pnl
+    fixed["ledger_reconciled"] = True
+    if paper_engine is not None:
+        paper_engine.balance = fixed["balance"]
+        paper_engine.session_start_balance = start
+        paper_engine._realized_pnl = ledger_pnl
+        await paper_engine.save_state()
+    return fixed
+
 
 async def _broadcast(msg: dict):
     """Send message to all connected WebSocket clients. Iterates over a snapshot to avoid set-mutation errors."""
@@ -494,7 +537,8 @@ async def get_forward(trader: str = ""):
         "vol":  getattr(m, "_vol_paper",  None),
     }
     if trader and trader in engine_map and engine_map[trader]:
-        return {**engine_map[trader].get_summary(), "ts_ist": ist_now_str()}
+        summary = await _reconcile_flat_summary(trader, engine_map[trader].get_summary(), engine_map[trader])
+        return {**summary, "ts_ist": ist_now_str()}
     # Combined: sum balances, merge trade histories
     summaries = [e.get_summary() for e in engine_map.values() if e]
     if not summaries:
@@ -599,8 +643,8 @@ async def volatile_reset():
 
 @app.post("/api/volatile/force-close")
 async def volatile_force_close():
-    asyncio.create_task(_get_vol().force_close())
-    return {"status": "force_close_initiated", "ts_ist": ist_now_str()}
+    await _get_vol().force_close()
+    return {"status": "force_close_done", "ts_ist": ist_now_str()}
 
 @app.post("/api/volatile/clear-memory")
 async def volatile_clear_memory():
@@ -712,12 +756,12 @@ async def force_close_trader(trader: str):
     For Volatile Trader: resets to SLEEP (options-only, no futures to close).
     """
     import backend.main as m
-    # Volatile Trader: reset is the equivalent of force-close
+    # Volatile Trader
     if trader == "vol":
         vol = getattr(m, "volatile", None)
         if vol:
-            asyncio.create_task(vol.force_close())
-        return {"status": "force_close_initiated", "trader": trader, "ts_ist": ist_now_str()}
+            await vol.force_close()
+        return {"status": "force_close_done", "trader": trader, "ts_ist": ist_now_str()}
     ex_map = {
         "bull": getattr(m, "bullish",  None),
         "bear": getattr(m, "bearish",  None),
@@ -733,8 +777,8 @@ async def force_close_trader(trader: str):
     if not has_position:
         return {"status": "no_position", "trader": trader,
                 "state": ex.state.value, "ts_ist": ist_now_str()}
-    asyncio.create_task(ex._do_force_close())
-    return {"status": "force_close_initiated", "trader": trader,
+    await ex._do_force_close()
+    return {"status": "force_close_done", "trader": trader,
             "state": ex.state.value, "ts_ist": ist_now_str()}
 
 
@@ -801,6 +845,21 @@ async def clear_trader_history(trader: str):
     paper = paper_map.get(trader)
     if paper:
         await paper.reset()
+
+    # Reset executor session memory
+    ex_map = {
+        "bull": getattr(m, "bullish", None),
+        "bear": getattr(m, "bearish", None),
+        "vol":  getattr(m, "volatile", None),
+    }
+    ex = ex_map.get(trader)
+    if ex:
+        if trader == "vol":
+            ex._session_pnl = 0.0
+        else:
+            ex.session_realized_futures_pnl = 0.0
+            ex.session_realized_hedge_pnl = 0.0
+            ex.session_start_ts = 0.0
 
     return {"status": "history_cleared", "trader": trader, "new_balance": 100000.0, "ts_ist": ist_now_str()}
 
@@ -921,6 +980,112 @@ async def get_journal_summary(trader: str = "all", from_date: str = "", to_date:
         },
         "ts_ist": ist_now_str()
     }
+
+
+# ── REST: Accounts (per-trader virtual balance + PnL breakdown) ───────────────
+
+@app.get("/api/accounts")
+async def get_accounts():
+    """
+    Per-trader virtual account snapshot: balance, equity, unrealized PnL,
+    session realized PnL (closed trades this session, from executor state),
+    and overall PnL (equity − $100k start).
+
+    session_realized_pnl differs from the paper engine's session_pnl:
+    - session_realized_pnl = sum of closed-trade PnL for the current active position
+    - paper engine session_pnl = equity − session_start_balance (includes unrealized)
+    """
+    import backend.main as m
+    STARTING = cfg.virtual_balance_usdt
+
+    traders: dict = {}
+
+    for key, ex_attr, paper_attr in [
+        ("bull", "bullish", "_bull_paper"),
+        ("bear", "bearish", "_bear_paper"),
+    ]:
+        ex    = getattr(m, ex_attr, None)
+        paper = getattr(m, paper_attr, None)
+        if not paper:
+            continue
+        summary  = await _reconcile_flat_summary(key, paper.get_summary(), paper)
+        has_fut  = bool(summary.get("open_positions"))
+        has_opt  = bool(summary.get("option_positions"))
+        has_pos  = has_fut or has_opt
+
+        position = None
+        if ex and has_pos:
+            position = {}
+            if ex.futures_remaining_qty > 0:
+                position["futures"] = {
+                    "side":    ex._futures_side,
+                    "qty":     ex.futures_remaining_qty,
+                    "entry":   ex.futures_entry_price,
+                    "current": ex.current_price,
+                }
+            if ex.hedge_symbol:
+                position["option"] = {
+                    "symbol": ex.hedge_symbol,
+                    "qty":    ex.hedge_qty,
+                    "entry":  ex.hedge_fill_price,
+                }
+
+        session_realized = 0.0
+        if ex:
+            session_realized = round(
+                ex.session_realized_futures_pnl + ex.session_realized_hedge_pnl, 2)
+
+        traders[key] = {
+            "name":                 ex.name if ex else key,
+            "state":                ex.state.value if ex else "UNKNOWN",
+            "starting_balance":     STARTING,
+            "balance":              summary["balance"],
+            "has_position":         has_pos,
+            "position":             position,
+            "unrealized_pnl":       summary["unrealized_pnl"],
+            "session_realized_pnl": session_realized,
+            "overall_pnl":          summary["total_pnl"],
+            "equity":               summary["equity"],
+        }
+
+    vol       = getattr(m, "volatile", None)
+    vol_paper = getattr(m, "_vol_paper", None)
+    if vol_paper:
+        summary    = await _reconcile_flat_summary("vol", vol_paper.get_summary(), vol_paper)
+        vol_status = vol.get_status() if vol else {}
+        has_pos    = (vol._state.value == "MANAGING") if vol else False
+
+        position = None
+        if vol and has_pos:
+            position = {
+                "put":  vol._put_leg  or {},
+                "call": vol._call_leg or {},
+            }
+
+        traders["vol"] = {
+            "name":                 vol.name if vol else "VolatileTrader_Paper",
+            "state":                vol._state.value if vol else "UNKNOWN",
+            "starting_balance":     STARTING,
+            "balance":              summary["balance"],
+            "has_position":         has_pos,
+            "position":             position,
+            "unrealized_pnl":       round(vol_status.get("unrealized_pnl", 0.0), 2),
+            "session_realized_pnl": round(vol._session_pnl, 2) if vol else 0.0,
+            "overall_pnl":          summary["total_pnl"],
+            "equity":               summary["equity"],
+        }
+
+    combined = {}
+    if traders:
+        combined = {
+            "starting_balance":       STARTING * len(traders),
+            "equity":                 round(sum(r["equity"]               for r in traders.values()), 2),
+            "overall_pnl":            round(sum(r["overall_pnl"]          for r in traders.values()), 2),
+            "total_unrealized":       round(sum(r["unrealized_pnl"]       for r in traders.values()), 2),
+            "total_session_realized": round(sum(r["session_realized_pnl"] for r in traders.values()), 2),
+        }
+
+    return {"traders": traders, "combined": combined, "ts_ist": ist_now_str()}
 
 
 # ── Panel HTML (no Node.js / build step needed) ───────────────────

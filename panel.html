@@ -1742,12 +1742,12 @@
           S.safeMode = d.mode === 'safe'; el('safe-badge').style.display = S.safeMode ? 'inline' : 'none'; break;
         case 'EVENT_CALENDAR':
           S.volatileEvent = d;
-          if (activeTab === 4) renderVolatileTab();
+          if (activeTab === 4) _safeRenderVol();
           break;
         case 'EVENT_FIRED':
           S.recentFiredEvent = d;
           S.volatileEvent = null;
-          if (activeTab === 4) renderVolatileTab();
+          if (activeTab === 4) _safeRenderVol();
           break;
       }
     }
@@ -2374,9 +2374,10 @@
     };
 
     // Add-event form input state (persists across renders)
-    let _volNewEventName = '';
-    let _volNewEventTime = '';
-    let _volEditingId    = null;   // id of event currently being edited in-place
+    let _volNewEventName  = '';
+    let _volNewEventTime  = '';
+    let _volEditingId     = null;   // id of event currently being edited in-place
+    let _volRenderPending = null;   // debounce timer for full tab rebuild
 
     function _volAddEvent() {
       const n = _volNewEventName.trim();
@@ -2398,13 +2399,13 @@
         if (d.status === 'saved') {
           _volNewEventName = '';
           _volNewEventTime = '';
-          // Immediately update local state so re-render shows the new event
-          // without waiting for the next WS POSITION_UPDATE
-          if (!S.vol) S.vol = {};
-          if (!S.vol.events) S.vol.events = [];
-          if (d.event) S.vol.events.push(d.event);
+          // Reload authoritative events list from DB (avoids duplicate from WS+local push)
+          fetch('/api/volatile/events').then(r=>r.json()).then(ev => {
+            if (!S.vol) S.vol = {};
+            S.vol.events = ev.events || [];
+            renderVolatileTab();
+          }).catch(() => renderVolatileTab());
           _volShowFeedback('Event saved to database ✓', '#4ade80');
-          renderVolatileTab();
         } else if (d.status === 'duplicate') {
           _volShowFeedback('Duplicate — same event already exists.', '#f59e0b');
         } else if (d.detail) {
@@ -2492,8 +2493,27 @@
 
     function _volResetTrader() {
       fetch('/api/volatile/reset', { method: 'POST' })
-        .then(r => r.json()).then(() => renderVolatileTab())
+        .then(r => r.json()).then(() => { _traderCfgEdits['vol'] = {}; renderVolatileTab(); })
         .catch(e => alert('Reset failed: ' + e));
+    }
+
+    // Safe re-render: never destroy focused inputs or pending settings edits.
+    // Always updates header stats immediately; debounces the full DOM rebuild
+    // to prevent button unresponsiveness caused by rapid tick-driven rerenders.
+    function _safeRenderVol() {
+      const volRoot = el('trader-vol-root');
+      const hasPendingEdits = Object.keys(_traderCfgEdits['vol'] || {}).length > 0;
+      const inputFocused = volRoot && volRoot.contains(document.activeElement) &&
+                           ['INPUT','TEXTAREA','SELECT'].includes(document.activeElement.tagName);
+      // Always refresh price/state/PnL badges in the header immediately (non-destructive)
+      _volUpdateLiveOnly();
+      if (hasPendingEdits || inputFocused) return;
+      // Debounce full rebuild: at most one rebuild per 300 ms
+      if (_volRenderPending) return;
+      _volRenderPending = setTimeout(() => {
+        _volRenderPending = null;
+        if (activeTab === 4) renderVolatileTab();
+      }, 300);
     }
 
     function _volFmtCountdown(ms) {
@@ -2507,6 +2527,7 @@
 
     // ── Main render function ────────────────────────────────────────────
     function renderVolatileTab() {
+      if (_volRenderPending) { clearTimeout(_volRenderPending); _volRenderPending = null; }
       const root = el('trader-vol-root'); if (!root) return;
       const vol   = S.vol || {};
       const state = vol.state || 'SLEEP';
@@ -2574,12 +2595,15 @@
       // ── EVENT LIST ──────────────────────────────────────────────────────
       const events = vol.events || [];
       const evRows = events.slice().reverse().map(e => {
-        const isUpcoming = e.status === 'upcoming';
+        const isTraded  = !!e.traded;
+        const isUpcoming = !isTraded && e.status === 'upcoming';
         const evMs = new Date(e.event_time + ':00+05:30').getTime();
-        const cdHtml = isUpcoming ? _volFmtCountdown(evMs) : '<span style="color:#4b5563">passed</span>';
-        const badge = isUpcoming
-          ? `<span style="font-size:9px;background:#14532d;color:#4ade80;padding:1px 6px;border-radius:3px;flex-shrink:0">upcoming</span>`
-          : `<span style="font-size:9px;background:#1f2937;color:#4b5563;padding:1px 6px;border-radius:3px;flex-shrink:0">passed</span>`;
+        const cdHtml = isUpcoming ? _volFmtCountdown(evMs) : '<span style="color:#4b5563">' + (isTraded ? 'traded' : 'passed') + '</span>';
+        const badge = isTraded
+          ? `<span style="font-size:9px;background:#1e3a5f;color:#60a5fa;padding:1px 6px;border-radius:3px;flex-shrink:0">✓ traded</span>`
+          : isUpcoming
+            ? `<span style="font-size:9px;background:#14532d;color:#4ade80;padding:1px 6px;border-radius:3px;flex-shrink:0">upcoming</span>`
+            : `<span style="font-size:9px;background:#1f2937;color:#4b5563;padding:1px 6px;border-radius:3px;flex-shrink:0">passed</span>`;
 
         // ── EDIT MODE (this row is being edited) ──────────────────────────
         if (_volEditingId === e.id) {
@@ -2690,10 +2714,10 @@
         const entry  = leg.entry_price || 0;
         const legPnl = leg.closed
           ? Math.round((leg.close_price - entry) * (leg.qty || 1) * 100) / 100
-          : bid > 0 ? Math.round((bid - entry) * (leg.qty || 1) * 100) / 100 : null;
+          : mark > 0 ? Math.round((mark - entry) * (leg.qty || 1) * 100) / 100 : null;
         const legPnlCol = legPnl == null ? '#6b7280' : legPnl >= 0 ? '#4ade80' : '#f87171';
         // Progress bar only makes sense while leg is open
-        const progPct   = !leg.closed && target > 0 && bid > 0 ? Math.min(bid / target * 100, 100) : 0;
+        const progPct   = !leg.closed && target > 0 && mark > 0 ? Math.min(mark / target * 100, 100) : 0;
         const progCol   = progPct >= 100 ? '#4ade80' : progPct >= 70 ? '#fbbf24' : '#60a5fa';
         const isExpired = leg.close_reason === 'EXPIRED';
         const statusBadge = leg.closed
@@ -2815,11 +2839,21 @@
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(edits),
-      }).then(r => r.json()).then(d => {
-        Object.assign(CFG, edits);
+      })
+      .then(r => {
+        if (!r.ok) return r.json().then(e => Promise.reject(e));
+        return r.json();
+      })
+      .then(d => {
+        Object.assign(CFG, edits);   // update local CFG only on confirmed save
         _traderCfgEdits['vol'] = {};
         renderVolatileTab();
-      }).catch(e => alert('Save failed: ' + e));
+        _volShowFeedback('Settings saved ✓', '#4ade80');
+      })
+      .catch(e => {
+        const errs = e?.detail?.errors || (e?.detail ? [e.detail] : ['Save failed']);
+        alert('Settings not saved:\n' + (Array.isArray(errs) ? errs.join('\n') : errs));
+      });
     }
 
     // Lightweight update: only refresh price/state/PnL when settings are being edited.
@@ -3150,18 +3184,24 @@
 
 // ── Volatile buttons ─────────────────────────────────────────
 async function _volForceClose() {
-  if(confirm("Force close volatile trader?")) {
-    await fetch('/api/volatile/force-close', {method: 'POST'});
-  }
+  if (!confirm("Force close volatile trader?\nAll open legs will be sold at current bid.")) return;
+  try {
+    const r = await fetch('/api/volatile/force-close', {method: 'POST'});
+    const d = await r.json();
+    if (!r.ok) { alert('Force close failed: ' + (d.detail || r.status)); return; }
+    _volShowFeedback('Force close executed ✓', '#4ade80');
+  } catch(e) { alert('Force close error: ' + e); }
 }
 async function _volClearMemory() {
-  if(!confirm("⚠ FULL RESET — Volatile Trader\n\nThis will permanently delete all trade history and reset the virtual balance to $100,000 USDT.\n\nNo exchange orders will be sent.\n\nConfirm full reset?")) return;
-  await fetch('/api/volatile/clear-memory', {method: 'POST'});
-  await fetch('/api/trader/vol/clear-history', {method: 'POST'});
-  const balEl = document.getElementById('tc-vol-balance');
-  if (balEl) balEl.textContent = '$100,000.00';
-  const jRoot = document.getElementById('tc-vol-journal-root');
-  if (jRoot) jRoot.innerHTML = '<div style="color:#6b7280;padding:12px">History cleared.</div>';
+  if (!confirm("⚠ FULL RESET — Volatile Trader\n\nThis will permanently delete all trade history and reset the virtual balance to $100,000 USDT.\n\nNo exchange orders will be sent.\n\nConfirm full reset?")) return;
+  try {
+    await fetch('/api/volatile/clear-memory', {method: 'POST'});
+    if (!S.vol) S.vol = {};
+    S.vol.put = null; S.vol.call = null;
+    S.vol.state = 'SLEEP'; S.vol.session_pnl = 0;
+    renderVolatileTab();
+    _volShowFeedback('Memory cleared — balance reset to $100,000 ✓', '#4ade80');
+  } catch(e) { alert('Clear memory error: ' + e); }
 }
 async function _updateSessionBanner() {
   try {
@@ -3210,11 +3250,7 @@ async function _updateSessionBanner() {
         err(['force_close_h','force_close_m'],
             `Squareoff ${fmt(v('force_close_h'),v('force_close_m'))} is BEFORE Window Close ${fmt(v('trade_end_h'),v('trade_end_m'))} in session context`);
 
-      // 3. Partial ratio must be >= 1.0 (must recover full premium before partial booking)
-      const ratio = v('partial_profit_ratio');
-      if (ratio !== null && ratio < 1.0)
-        err(['partial_profit_ratio'],
-            `Partial Ratio ${ratio} < 1.0 — partial books before recovering option premium (guaranteed partial loss on option cost)`);
+      // 3. Partial ratio — no lower bound enforced, user decides their strategy
 
       // 4. max_time_value cannot exceed max_premium (TV is a sub-component of premium)
       const maxTV = v('max_time_value'), maxPrem = v('max_premium');
@@ -3351,7 +3387,7 @@ async function _updateSessionBanner() {
         ${inp('max_time_value',        'Max Time Value ($)',  5,  0,   1000, 'TV = ask − intrinsic. Must be ≤ this')}
         ${inp('price_diff_percent',    'Max Spread (%)',     .5,  0,   50,   '|ask−mark|/mark × 100 must be ≤ this')}
         ${inp('contract_qty',          'Trade Size (BTC)',   .01,.01,  5,    'BTC contracts per trade')}
-        ${inp('partial_profit_ratio',  'Partial Ratio',     .01, 1.0, 10,   'Trigger 50% sell when fut_pnl ≥ premium × this')}
+        ${inp('partial_profit_ratio',  'Partial Ratio',     .01, .01, 10,   'Trigger 50% sell when fut_pnl ≥ premium × this')}
         ${inp('session_pnl_target',    'Session Target ($)',  10, 10,  1e5,  'Close all futures when cumulative futures PnL ≥ this')}
       </div>
       <div id="tc-${key}-cfg-errors" style="display:none;background:#0a0614;border:1px solid #374151;border-radius:4px;padding:7px 10px;margin-top:8px"></div>
@@ -3709,7 +3745,7 @@ async function _updateSessionBanner() {
         _step(inWin||inPos, !inWin&&!inPos&&!state.includes('SLEEP'), false,
           `Trading window ${inWin?'OPEN':'CLOSED'}`,
           inWin?`${ft(startH,startM)}–${ft(endH,endM)} IST · Squareoff ${ft(forceH,forceM)}`
-               :`Reopens ${ft(startH,startM)} IST next trading day`) +
+               :(() => { const n=new Date(),nm=n.getHours()*60+n.getMinutes(),sm=startH*60+startM,d=(sm-nm+1440)%1440; return `Reopens ${ft(startH,startM)} IST`+(d<=120?` — in ${d} min`:''); })()) +
 
         (() => {
           const ar    = pos.analysis_report || {};
@@ -4112,15 +4148,7 @@ async function _updateSessionBanner() {
     // ── Wire WS events to live updater (no shell rebuild) ──────────────
     function _onTraderUpdate(key) {
       if (key === 'vol') {
-        if (activeTab === 4) {
-          // If user has pending settings edits, only update the live sections
-          // (price, state, positions, logs) — never destroy the settings inputs mid-edit.
-          if (Object.keys(_traderCfgEdits['vol'] || {}).length > 0) {
-            _volUpdateLiveOnly();
-          } else {
-            renderVolatileTab();
-          }
-        }
+        if (activeTab === 4) _safeRenderVol();
         return;
       }
       const tabIdx = key==='bull'?2:key==='bear'?3:-1;
@@ -5424,7 +5452,7 @@ async function _updateSessionBanner() {
             label: '💼 Position Size & Profit Targets',
             params: [
               { k: 'bull_contract_qty',         l: 'Trade Size (BTC)',         step: 0.01, min: 0.01, max: 1,      note: 'How many BTC to trade per setup. Example: 1 = 1 BTC futures + 1 PUT option contract' },
-              { k: 'bull_partial_profit_ratio',  l: 'Partial Profit Trigger',   step: 0.01, min: 1.0,  max: 10,     note: 'Sell half futures when profit = this × premium paid. Example: 1.1 = sell 50% futures when profit ≥ 110% of option cost' },
+              { k: 'bull_partial_profit_ratio',  l: 'Partial Profit Trigger',   step: 0.01, min: 0.01, max: 10,     note: 'Sell half futures when profit = this × premium paid. Example: 0.5 = sell 50% futures when profit ≥ 50% of option cost' },
               { k: 'bull_full_close_target',     l: 'Full Close Target ($)',    step: 10,   min: 10,   max: 100000, note: 'Close everything when total profit reaches this. Example: 800 = close when total PnL ≥ $800' },
             ]
           },
@@ -5469,7 +5497,7 @@ async function _updateSessionBanner() {
             label: '💼 Position Size & Profit Targets',
             params: [
               { k: 'bear_contract_qty',         l: 'Trade Size (BTC)',       step: 0.01, min: 0.01, max: 1,      note: 'How many BTC to trade. Example: 1 = 1 BTC short futures + 1 CALL option contract' },
-              { k: 'bear_partial_profit_ratio',  l: 'Partial Profit Trigger', step: 0.01, min: 1.0,  max: 10,     note: 'Sell half futures when profit = this × premium paid. Example: 1.1 = sell when profit ≥ 110% of option cost' },
+              { k: 'bear_partial_profit_ratio',  l: 'Partial Profit Trigger', step: 0.01, min: 0.01, max: 10,     note: 'Sell half futures when profit = this × premium paid. Example: 0.5 = sell when profit ≥ 50% of option cost' },
               { k: 'bear_full_close_target',     l: 'Full Close Target ($)',  step: 10,   min: 10,   max: 100000, note: 'Close everything when total profit reaches this. Example: 800 = close at $800 total PnL' },
             ]
           },
@@ -5866,7 +5894,8 @@ async function _updateSessionBanner() {
     let _accData    = { bull: null, bear: null, vol: null };
     let _accTrades  = { bull: [], bear: [], vol: [] };
     let _accSessions= { bull: [], bear: [], vol: [] };
-    let _accFilter  = { bull: 'live', bear: 'live', vol: 'live' };  // 'live' | 'history'
+    let _accFilter  = { bull: 'history', bear: 'history', vol: 'history' };  // default: DB history (persistent, survives restart)
+    let _accApiData = null;   // result from /api/accounts (executor session_realized_pnl)
     let _accRefreshTimer = null;
 
     async function _loadAllAccounts() {
@@ -5883,12 +5912,15 @@ async function _updateSessionBanner() {
               <button onclick="_loadAllAccounts()" style="font-size:9px;padding:2px 10px;background:#0f172a;border:1px solid #374151;border-radius:3px;color:#9ca3af;cursor:pointer">↻ Refresh</button>
             </div>
           </div>
-          <div id="acc-combined-bar" style="display:grid;grid-template-columns:repeat(4,1fr);gap:6px;flex-shrink:0"></div>
+          <div id="acc-combined-bar" style="display:grid;grid-template-columns:repeat(6,1fr);gap:4px;flex-shrink:0"></div>
           <div id="acc-traders-grid" style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px;flex:1;min-height:0"></div>`;
       }
 
-      // Fetch all data in parallel
-      await Promise.all(['bull','bear','vol'].map(k => _fetchAccountData(k)));
+      // Fetch all data in parallel (paper engine summaries + accounts API)
+      await Promise.all([
+        ...['bull','bear','vol'].map(k => _fetchAccountData(k)),
+        fetch('/api/accounts').then(r=>r.json()).then(d=>{ _accApiData = d; }).catch(()=>{}),
+      ]);
       _renderCombinedBar();
       ['bull','bear','vol'].forEach(k => _renderTraderAccount(k));
       setText('acc-last-refresh', 'Updated: ' + new Date().toLocaleTimeString());
@@ -5915,22 +5947,28 @@ async function _updateSessionBanner() {
 
     function _renderCombinedBar() {
       const bar = el('acc-combined-bar'); if (!bar) return;
-      let totalBal = 0, totalEquity = 0, totalUnreal = 0, totalRealised = 0, totalTotal = 0;
+      let totalBal = 0, totalEquity = 0, totalUnreal = 0, totalOpenPnl = 0, totalRealised = 0, totalTotal = 0;
       ['bull','bear','vol'].forEach(k => {
         const d = _accData[k];
         if (!d) return;
         totalBal      += d.balance        || 0;
         totalEquity   += d.equity         || 0;
         totalUnreal   += d.unrealized_pnl || 0;
+        totalOpenPnl  += d.open_pnl       || 0;
         totalRealised += d.realized_pnl   || 0;
         totalTotal    += d.total_pnl      || 0;
       });
-      // total_pnl = equity − 100k (realized + unrealized) — the TRUE P&L
+      // Binance-style combined summary:
+      // Balance = cash; Equity = Balance + Unrealized; Total PnL = Equity - 300k start
+      const _combApi = (_accApiData && _accApiData.combined) ? _accApiData.combined : {};
+      const totalSessReal = _combApi.total_session_realized || 0;
       const cards = [
-        { label: 'Combined Balance',   val: totalBal,      col: '#4ade80',                               note: 'Cash after closed trades & option premiums' },
-        { label: 'Combined Equity',    val: totalEquity,   col: '#60a5fa',                               note: 'Balance + open position MTM' },
-        { label: 'Realized PnL',       val: totalRealised, col: totalRealised>=0?'#4ade80':'#f87171',    note: 'Closed trades + options (Balance − 100k)' },
-        { label: 'Total PnL (true)',   val: totalTotal,    col: totalTotal>=0?'#4ade80':'#f87171',       note: 'Equity − 100k  (Realized + Unrealized)' },
+        { label: 'Combined Balance',   val: totalBal,        col: '#4ade80',                                note: 'Cash across all 3 traders after premiums paid and closed trade PnL' },
+        { label: 'Combined Equity',    val: totalEquity,     col: '#60a5fa',                                note: 'Balance + market value of all open positions. Equity = Balance + Unrealized.' },
+        { label: 'Unrealized',         val: totalUnreal,     col: totalUnreal>=0?'#4ade80':'#f87171',       note: 'Market value of all open positions (equity − balance). If closed NOW, this is what you get.' },
+        { label: 'Sess. Realized',     val: totalSessReal,   col: totalSessReal>=0?'#4ade80':'#f87171',     note: 'Combined closed-trade PnL from currently active positions this session (futures + option legs). Resets per position.' },
+        { label: 'Realized PnL',       val: totalRealised,   col: totalRealised>=0?'#4ade80':'#f87171',     note: 'PnL from CLOSED positions only — what has actually been banked from completed trades.' },
+        { label: 'Total PnL',          val: totalTotal,      col: totalTotal>=0?'#4ade80':'#f87171',        note: 'Equity − $300k start. Full picture: realized gains + current open position value change.' },
       ];
       const _isAbsCard = l => l === 'Combined Balance' || l === 'Combined Equity';
       bar.innerHTML = cards.map(c => `
@@ -5955,16 +5993,23 @@ async function _updateSessionBanner() {
       const meta = _ACC[key];
       const bal   = d.balance        || 0;
       const eq    = d.equity         || 0;
-      const unr   = d.unrealized_pnl || 0;
+      const unr   = d.unrealized_pnl || 0;   // = equity - balance (always: equity = balance + unr)
+      const opnl  = d.open_pnl       || 0;   // = opt_mtm + futures_mtm (change from cost)
       const rpnl  = d.realized_pnl   || 0;
       const tpnl  = d.total_pnl      || 0;
       const spnl  = d.session_pnl    || 0;
       const tcount = d.trade_count   || 0;
+      // Session realized PnL from executor state (closed trades this session only)
+      const accApi   = (_accApiData && _accApiData.traders) ? (_accApiData.traders[key] || {}) : {};
+      const srpnl    = accApi.session_realized_pnl || 0;
+      const hasPos   = accApi.has_position || false;
+      const posState = accApi.state || '';
       const balCol  = '#4ade80';
       const unrCol  = unr  >= 0 ? '#4ade80' : '#f87171';
       const rpnlCol = rpnl >= 0 ? '#4ade80' : '#f87171';
       const tpnlCol = tpnl >= 0 ? '#4ade80' : '#f87171';
       const spnlCol = spnl >= 0 ? '#4ade80' : '#f87171';
+      const srpnlCol = srpnl >= 0 ? '#4ade80' : '#f87171';
 
       // Open positions
       const openFut = Object.values(d.open_positions   || {});
@@ -5983,7 +6028,10 @@ async function _updateSessionBanner() {
         <!-- ── Header ── -->
         <div style="background:#050a14;border-bottom:2px solid ${meta.col};padding:6px 10px;flex-shrink:0">
           <div style="display:flex;justify-content:space-between;align-items:center">
-            <span style="font-weight:bold;color:${meta.col};font-size:12px">${meta.icon} ${meta.label}</span>
+            <div style="display:flex;align-items:center;gap:6px">
+              <span style="font-weight:bold;color:${meta.col};font-size:12px">${meta.icon} ${meta.label}</span>
+              <span style="font-size:8px;padding:1px 5px;border-radius:2px;background:${hasPos?'#14532d':'#1a1a2e'};color:${hasPos?'#4ade80':'#4b5563'};border:1px solid ${hasPos?'#166534':'#2d2d4e'}" title="Executor state: ${posState}">${hasPos ? '● POSITION OPEN' : '○ FLAT'}</span>
+            </div>
             <div style="display:flex;gap:4px">
               <button onclick="_accFilter['${key}']='live';_renderTraderAccount('${key}')"
                 style="font-size:9px;padding:1px 7px;border-radius:3px;cursor:pointer;border:1px solid ${filter==='live'?meta.col:'#374151'};background:${filter==='live'?'#0f172a':'transparent'};color:${filter==='live'?meta.col:'#6b7280'}">Live</button>
@@ -5996,20 +6044,29 @@ async function _updateSessionBanner() {
         </div>
 
         <!-- ── Balance Row ── -->
-        <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:0;border-bottom:1px solid #1a2540;flex-shrink:0">
+        <div style="display:grid;grid-template-columns:repeat(5,1fr);gap:0;border-bottom:1px solid #1a2540;flex-shrink:0">
           ${[
-            ['Balance',          _fmtUsd(bal),       balCol,   'Cash balance after closed trades'],
-            ['Equity',           _fmtUsd(eq),        '#60a5fa','Balance + open MTM'],
-            ['Realized PnL',     _fmtUsdSign(rpnl),  rpnlCol, 'Balance − $100k'],
-            ['Total PnL (true)', _fmtUsdSign(tpnl),  tpnlCol, 'Equity − $100k'],
+            ['Balance',          _fmtUsd(bal),        balCol,            'Cash balance after all closed trades and option premiums paid'],
+            ['Equity',           _fmtUsd(eq),         '#60a5fa',         'Balance + market value of open positions'],
+            ['Market Value',     _fmtUsd(unr),        '#93c5fd',         'Total market value of all open positions (Equity − Balance)'],
+            ['Unrealized PnL',   _fmtUsdSign(opnl),   opnl>=0?'#4ade80':'#f87171', 'Change in value of open positions from entry cost (MTM PnL)'],
+            ['Total PnL',        _fmtUsdSign(tpnl),   tpnlCol,           'Equity − $100,000 start (full picture: realized + unrealized)'],
           ].map(([l,v,c,tip]) => `
-            <div style="padding:5px 8px;border-right:1px solid #1a2540" title="${tip}">
-              <div style="font-size:8px;color:#4b5563;text-transform:uppercase;letter-spacing:.06em">${l}</div>
-              <div style="font-size:11px;font-weight:bold;font-family:monospace;color:${c}">${v}</div>
+            <div style="padding:5px 6px;border-right:1px solid #1a2540" title="${tip}">
+              <div style="font-size:7px;color:#4b5563;text-transform:uppercase;letter-spacing:.06em">${l}</div>
+              <div style="font-size:10px;font-weight:bold;font-family:monospace;color:${c}">${v}</div>
             </div>`).join('')}
-          <div style="padding:5px 8px;background:#060d18">
-            <div style="font-size:8px;color:#4b5563;text-transform:uppercase;letter-spacing:.06em">Unrealized</div>
-            <div style="font-size:11px;font-weight:bold;font-family:monospace;color:${unrCol}">${_fmtUsdSign(unr)}</div>
+        </div>
+        <!-- Realized PnL + Session Realized PnL row -->
+        <div style="display:flex;align-items:center;gap:16px;border-bottom:1px solid #1a2540;flex-shrink:0;padding:3px 8px;background:#040810">
+          <div style="display:flex;align-items:center;gap:4px">
+            <span style="font-size:8px;color:#4b5563">Realized PnL:&nbsp;</span>
+            <span style="font-size:9px;font-weight:bold;font-family:monospace;color:${rpnlCol}" title="Sum of PnL from all CLOSED positions (sold options + closed futures). Does NOT include option premiums paid for still-open positions.">${_fmtUsdSign(rpnl)}</span>
+            <span style="font-size:8px;color:#1e3a5f;margin-left:4px">from ${tcount} trade(s)</span>
+          </div>
+          <div style="display:flex;align-items:center;gap:4px;border-left:1px solid #1a2540;padding-left:16px">
+            <span style="font-size:8px;color:#4b5563" title="PnL from trades CLOSED in the current active position session (futures + hedge). Resets when a new position is entered.">Session Realized:&nbsp;</span>
+            <span style="font-size:9px;font-weight:bold;font-family:monospace;color:${srpnlCol}">${Object.keys(accApi).length === 0 ? '—' : _fmtUsdSign(srpnl)}</span>
           </div>
         </div>
 
@@ -6079,7 +6136,55 @@ async function _updateSessionBanner() {
 
     function _buildDbTradeLog(trades, col) {
       if (!trades.length) return '<div style="color:#374151;padding:12px;font-size:10px;text-align:center">No trade records found in the database.</div>';
-      return `
+
+      // ── Summary stats ──────────────────────────────────────────────────────
+      const pnlTrades   = trades.filter(t => (t.pnl || 0) !== 0);
+      const wins        = pnlTrades.filter(t => t.pnl > 0);
+      const losses      = pnlTrades.filter(t => t.pnl < 0);
+      const netPnl      = trades.reduce((s, t) => s + (t.pnl || 0), 0);
+      const bestTrade   = pnlTrades.reduce((best, t) => t.pnl > (best?.pnl||0) ? t : best, null);
+      const worstTrade  = pnlTrades.reduce((worst, t) => t.pnl < (worst?.pnl||0) ? t : worst, null);
+      const winRate     = pnlTrades.length ? Math.round(wins.length / pnlTrades.length * 100) : 0;
+      const netCol      = netPnl >= 0 ? '#4ade80' : '#f87171';
+      const winBarW     = pnlTrades.length ? Math.round(wins.length / pnlTrades.length * 100) : 0;
+
+      const summaryHtml = `
+        <div style="background:#040d1a;border-bottom:1px solid #1a2540;padding:7px 10px;flex-shrink:0">
+          <div style="font-size:8px;color:#4b5563;text-transform:uppercase;letter-spacing:.07em;margin-bottom:5px">All-Time Trade Summary</div>
+          <div style="display:grid;grid-template-columns:repeat(5,1fr);gap:4px;margin-bottom:5px">
+            ${[
+              ['Total Trades', trades.length,           '#9ca3af', false],
+              ['PnL Trades',   pnlTrades.length,        '#9ca3af', false],
+              ['Wins',         wins.length,             '#4ade80', false],
+              ['Losses',       losses.length,           '#f87171', false],
+              ['Win Rate',     winRate + '%',           winRate>=50?'#4ade80':'#f87171', false],
+            ].map(([l,v,c])=>`
+              <div style="background:#080f1d;border:1px solid #1a2540;border-radius:3px;padding:4px 6px">
+                <div style="font-size:7px;color:#374151;letter-spacing:.05em">${l}</div>
+                <div style="font-size:11px;font-weight:bold;font-family:monospace;color:${c}">${v}</div>
+              </div>`).join('')}
+          </div>
+          <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:4px;margin-bottom:5px">
+            ${[
+              ['Net PnL',   (netPnl>=0?'+':'')+netPnl.toFixed(2), netCol],
+              ['Best Trade',  bestTrade  ? (bestTrade.pnl>0?'+':'')+bestTrade.pnl.toFixed(2)  : '—', '#4ade80'],
+              ['Worst Trade', worstTrade ? (worstTrade.pnl<0?'':'')+worstTrade.pnl.toFixed(2) : '—', '#f87171'],
+            ].map(([l,v,c])=>`
+              <div style="background:#080f1d;border:1px solid #1a2540;border-radius:3px;padding:4px 6px">
+                <div style="font-size:7px;color:#374151;letter-spacing:.05em">${l}</div>
+                <div style="font-size:11px;font-weight:bold;font-family:monospace;color:${c}">$${v}</div>
+              </div>`).join('')}
+          </div>
+          ${pnlTrades.length > 0 ? `
+          <div style="background:#080f1d;border-radius:2px;overflow:hidden;height:4px;border:1px solid #1a2540">
+            <div style="height:100%;width:${winBarW}%;background:#4ade80;transition:width .3s"></div>
+          </div>
+          <div style="display:flex;justify-content:space-between;font-size:7px;color:#374151;margin-top:1px">
+            <span>Wins ${wins.length}</span><span>Losses ${losses.length}</span>
+          </div>` : ''}
+        </div>`;
+
+      return summaryHtml + `
         <table style="width:100%;border-collapse:collapse;font-size:10px">
           <thead>
             <tr style="background:#0a0f1e;position:sticky;top:0">
@@ -6095,7 +6200,7 @@ async function _updateSessionBanner() {
           </thead>
           <tbody>
             ${trades.map(t => {
-              const pnlCol = (t.pnl||0) > 0 ? '#4ade80' : (t.pnl||0) < 0 ? '#f87171' : '#6b7280';
+              const pnlCol  = (t.pnl||0) > 0 ? '#4ade80' : (t.pnl||0) < 0 ? '#f87171' : '#6b7280';
               const sideCol = t.side === 'BUY' ? '#4ade80' : '#f87171';
               const sessShort = (t.session_id || '').replace('_IST','').replace(/_/g,' ');
               return `<tr style="border-bottom:1px solid #0d1525">

@@ -30,7 +30,7 @@ from backend.message_bus import (
 )
 from backend.config import cfg
 from backend.state_store import store
-from backend.utils import (ist_now, ist_now_str, get_session_boundaries,
+from backend.utils import (ist_now, ist_now_str,
                            is_in_session_range, has_reached_session_time,
                            get_session_day)
 
@@ -166,6 +166,18 @@ class BaseExecutor:
         # Sync open position into paper engine so PnL tracks correctly after restart
         if self._paper is not None:
             self._paper.load_state(getattr(self._paper, "_state_key", "paper_engine_state"))
+
+            # If executor is SLEEP (no active trade), remove any stale positions that
+            # belong to this executor from the paper engine. This handles the case where
+            # force_close closed the positions but the paper engine's background save_state
+            # task didn't complete before a server restart — leaving ghost positions.
+            _active_states = {"MANAGING_POSITION", "PARTIAL_BOOKING", "FORCE_CLOSE",
+                              "VERIFY_HEDGE_LOOP", "EXECUTE"}
+            if (saved.get("state", "SLEEP") if saved else "SLEEP") not in _active_states:
+                self._paper.clear_executor_positions(self.name)
+                await self._paper.save_state()
+                self.log.info(f"{self.name}: cleared stale paper engine positions (executor is SLEEP)")
+
             self.sync_position_to_paper()
 
         # Auto-reset if the hedge option has already expired (server was down at force-close time)
@@ -174,6 +186,20 @@ class BaseExecutor:
                 f"Hedge option {self.hedge_symbol} has EXPIRED. "
                 f"Forcing full reset — stale position cleared."
             )
+            # Realize the full premium loss in the paper engine BEFORE clearing state.
+            # Without this, the premium was deducted from balance at buy time but
+            # _realized_pnl was never updated → gap between Realized PnL and Total PnL.
+            if self.is_paper and self._paper and self.hedge_symbol and self.hedge_qty > 0:
+                self._paper.executor = self.name
+                from backend.utils import ist_now_str as _isn, utc_now as _utn
+                await self._paper.sell_option(
+                    self.hedge_symbol, self.hedge_qty, 0.0, action="EXPIRED_AT_STARTUP")
+                await store.save_paper_trade(
+                    self.name, "EXPIRED_AT_STARTUP", self.hedge_symbol, "SELL",
+                    self.hedge_qty, 0.0,
+                    -(self.hedge_fill_price * self.hedge_qty),
+                    notes=f"Expired while server offline — entry={self.hedge_fill_price:.2f}",
+                    ts_ist=_isn(), ts_utc=_utn())
             self._reset_position()
             await self._reset_daily()
             await self._save_state()
@@ -287,9 +313,12 @@ class BaseExecutor:
             await self._publish_monitor(p, False)
             return
 
+        # None-safe integer config reader — treats 0 as a valid value (not falsy default)
+        def _ci(key, default): v = self._cfg(key); return int(v) if v is not None else default
+
         # ── FORCE CLOSE check (session-aware: handles cross-midnight) ─────────
-        _fc_h = int(self._cfg("force_close_h") or 18)
-        _fc_m = int(self._cfg("force_close_m") or 30)
+        _fc_h = _ci("force_close_h", 18)
+        _fc_m = _ci("force_close_m", 30)
         _has_open_hedge = bool(self.hedge_symbol and self.hedge_qty)
         _force_reached = has_reached_session_time(_now_h, _now_m, _fc_h, _fc_m, _exp_h, _exp_m)
         if _force_reached:
@@ -304,7 +333,11 @@ class BaseExecutor:
                         _eh, _em, _ = [int(x) for x in _tp.split(":")]
                         # If trade was entered AFTER the force_close point in session order,
                         # this session's force_close hasn't arrived yet — skip.
-                        if has_reached_session_time(_fc_h, _fc_m, _eh, _em, _exp_h, _exp_m):
+                        _entry_after_fc = (
+                            has_reached_session_time(_eh, _em, _fc_h, _fc_m, _exp_h, _exp_m)
+                            and (_eh, _em) != (_fc_h, _fc_m)
+                        )
+                        if _entry_after_fc:
                             _should_force = False
                     except Exception:
                         pass
@@ -325,10 +358,10 @@ class BaseExecutor:
                 return
 
         # ── Window bounds (session-aware: handles cross-midnight) ────────────
-        _ts_h = int(self._cfg("trade_start_h") or 4)
-        _ts_m = int(self._cfg("trade_start_m") or 0)
-        _te_h = int(self._cfg("trade_end_h")   or 18)
-        _te_m = int(self._cfg("trade_end_m")   or 30)
+        _ts_h = _ci("trade_start_h", 4)
+        _ts_m = _ci("trade_start_m", 0)
+        _te_h = _ci("trade_end_h",  18)
+        _te_m = _ci("trade_end_m",  30)
         in_window = self.force_window or is_in_session_range(
             _now_h, _now_m, _ts_h, _ts_m, _te_h, _te_m, _exp_h, _exp_m
         )
@@ -337,10 +370,14 @@ class BaseExecutor:
         if self.state == ExState.SLEEP:
             if in_window:
                 # If already determined INELIGIBLE today, stay SLEEP — no re-check
-                # until new day (prevents spam loop SLEEP→CHECK→INELIGIBLE→SLEEP)
+                # UNLESS price has since moved into eligibility range (e.g. OB approached)
                 if self._eligibility_date == session_day and self.eligible_today is False:
-                    await self._publish_monitor(p, in_window)
-                    return
+                    tl = self.locked_high_line or self.locked_low_line
+                    if tl and self._is_eligible(p, tl):
+                        pass  # price now in range — fall through to re-evaluate
+                    else:
+                        await self._publish_monitor(p, in_window)
+                        return
                 # If analysis failed (no candle data), wait for retry cooldown
                 retry_after = getattr(self, "_analysis_retry_after", 0)
                 if retry_after and time.time() < retry_after:
@@ -747,6 +784,12 @@ class BaseExecutor:
                                                 rbx_qty, rbx_px, action="PARTIAL_REBUY")
                 await store.log_trade(self.name, "PARTIAL_REBUY", "BTCUSDT",
                                       self._futures_side, rbx_qty, rbx_px, 0.0, "FILLED", {}, self.is_paper)
+                from backend.utils import ist_now_str as _isn, utc_now as _utn
+                await store.save_paper_trade(
+                    self.name, "PARTIAL_REBUY", "BTCUSDT", self._futures_side,
+                    rbx_qty, rbx_px, 0.0,
+                    notes=f"rebuy limit filled | new_avg={new_avg:.2f}",
+                    ts_ist=_isn(), ts_utc=_utn())
                 self._recalc_price_levels()  # TP levels update with new avg
                 await self._log(
                     f"REBUY LIMIT FILLED @ {rbx_px:.2f}  new_avg={new_avg:.2f}  "
@@ -1026,6 +1069,11 @@ class BaseExecutor:
             )
             await store.log_trade(self.name, "FULL_CLOSE_FUTURES", "BTCUSDT", side,
                                   qty, fp, pnl, "FILLED", {}, self.is_paper)
+            from backend.utils import ist_now_str as _isn, utc_now as _utn
+            await store.save_paper_trade(
+                self.name, "FULL_CLOSE_FUTURES", "BTCUSDT", side, qty, fp, pnl,
+                notes=f"session target hit | entry={self.futures_entry_price:.2f}",
+                ts_ist=_isn(), ts_utc=_utn())
 
         # Only reset futures fields — hedge remains open
         self.futures_entry_price   = 0.0
@@ -1036,6 +1084,15 @@ class BaseExecutor:
         self.full_close_price      = 0.0
         self.state = ExState.SLEEP
         await self._log("Futures closed (session target). Option held for squareoff.")
+        if self.execution_time_ist:
+            sid = self.execution_time_ist.replace(" ", "_").replace(":", "-")
+            await store.save_session(
+                session_id=sid, trader_name=self.name,
+                futures_pnl=self.session_realized_futures_pnl,
+                hedge_pnl=self.session_realized_hedge_pnl,
+                total_pnl=self.session_realized_futures_pnl + self.session_realized_hedge_pnl,
+                status="open",
+            )
         await self._save_state()
         await self._broadcast_position()
 
@@ -1105,6 +1162,12 @@ class BaseExecutor:
                                      f" @ {fp:.2f}  pnl={pnl:+.2f}")
                     await store.log_trade(self.name, "FORCE_CLOSE_HEDGE", self.hedge_symbol, "SELL",
                                           self.hedge_qty, fp, pnl, "FILLED", {}, self.is_paper)
+                    from backend.utils import ist_now_str as _isn, utc_now as _utn
+                    await store.save_paper_trade(
+                        self.name, "FORCE_CLOSE_HEDGE", self.hedge_symbol, "SELL",
+                        self.hedge_qty, fp, pnl,
+                        notes=f"squareoff | entry={self.hedge_fill_price:.2f}",
+                        ts_ist=_isn(), ts_utc=_utn())
 
             async def _close_futures():
                 if not self.futures_remaining_qty:
@@ -1125,6 +1188,11 @@ class BaseExecutor:
                     await self._log(f"SQUAREOFF futures: {side} {qty} BTC @ {fp:.2f}  pnl={pnl:+.2f}")
                     await store.log_trade(self.name, "FORCE_CLOSE_FUTURES", "BTCUSDT", side,
                                           qty, fp, pnl, "FILLED", {}, self.is_paper)
+                    from backend.utils import ist_now_str as _isn, utc_now as _utn
+                    await store.save_paper_trade(
+                        self.name, "FORCE_CLOSE_FUTURES", "BTCUSDT", side, qty, fp, pnl,
+                        notes=f"squareoff | entry={self.futures_entry_price:.2f}",
+                        ts_ist=_isn(), ts_utc=_utn())
 
             if option_first:
                 await _close_option()
@@ -1133,7 +1201,18 @@ class BaseExecutor:
                 await _close_futures()
                 await _close_option()
 
-            await self._reset_position()
+            if self.execution_time_ist:
+                sid = self.execution_time_ist.replace(" ", "_").replace(":", "-")
+                await store.save_session(
+                    session_id=sid, trader_name=self.name,
+                    futures_pnl=self.session_realized_futures_pnl,
+                    hedge_pnl=self.session_realized_hedge_pnl,
+                    total_pnl=self.session_realized_futures_pnl + self.session_realized_hedge_pnl,
+                    close_reason="squareoff",
+                    close_ts_ist=ist_now_str(),
+                    status="closed",
+                )
+            self._reset_position()
             self.state             = ExState.SLEEP
             # Block re-entry for the rest of this SESSION — force close ends the session
             _n = ist_now()
@@ -1153,6 +1232,12 @@ class BaseExecutor:
             if self.execution_time_ist:
                 sid = self.execution_time_ist.replace(" ", "_").replace(":", "-")
                 await store.mark_session_force_closed(sid)
+            # CRITICAL: await paper engine save explicitly so all closed positions are
+            # persisted to SQLite BEFORE executor state is saved.
+            # Without this, paper engine save is a background create_task that may not
+            # complete before a restart — causing the option to reappear in accounts.
+            if self._paper is not None:
+                await self._paper.save_state()
             await self._save_state()
             await self._broadcast_position()
 
@@ -1197,6 +1282,12 @@ class BaseExecutor:
             await self._log(f"HEDGE SOLD: {self.hedge_symbol}  @ {fp:.2f}  pnl={pnl:+.2f}")
             await store.log_trade(self.name, "HEDGE_SELL", self.hedge_symbol, "SELL",
                                   self.hedge_qty, fp, pnl, "FILLED", {}, self.is_paper)
+            from backend.utils import ist_now_str as _isn, utc_now as _utn
+            await store.save_paper_trade(
+                self.name, "HEDGE_SELL", self.hedge_symbol, "SELL",
+                self.hedge_qty, fp, pnl,
+                notes=f"hedge sold after futures TP | entry={self.hedge_fill_price:.2f}",
+                ts_ist=_isn(), ts_utc=_utn())
 
     # ── Monitor / broadcast ────────────────────────────────────────────────
 
@@ -1356,10 +1447,11 @@ class BaseExecutor:
         n = ist_now()
         exp_h = int(getattr(cfg, "session_expiry_h", 13))
         exp_m = int(getattr(cfg, "session_expiry_m", 30))
+        def _ci(key, default): v = self._cfg(key); return int(v) if v is not None else default
         return is_in_session_range(
             n.hour, n.minute,
-            int(self._cfg("trade_start_h") or 4),  int(self._cfg("trade_start_m") or 0),
-            int(self._cfg("trade_end_h")   or 18), int(self._cfg("trade_end_m")   or 30),
+            _ci("trade_start_h", 4),  _ci("trade_start_m", 0),
+            _ci("trade_end_h",  18),  _ci("trade_end_m",  30),
             exp_h, exp_m,
         )
 
@@ -1814,5 +1906,4 @@ class BaseExecutor:
     def _is_eligible(self, price: float, target_line: float) -> bool:
         """Return True if price is in the correct zone for this direction."""
         raise NotImplementedError
-
 
