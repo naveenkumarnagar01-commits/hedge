@@ -141,6 +141,14 @@ class BaseExecutor:
         # True while _run_ob_analysis is awaited — shown as "CALCULATING" in panel
         self._is_analyzing: bool = False
 
+        # OB wait-mode: window is open but no qualifying zone existed at open.
+        # Trader stays SLEEP and watches for a new candle-close on its OB TF.
+        # As soon as a valid zone forms, it locks it and transitions to CHECK_ELIGIBILITY.
+        self._ob_wait_active:    bool  = False
+        self._ob_wait_since:     str   = ""   # IST timestamp when wait started
+        self._ob_wait_reason:    str   = ""   # why no zone at window open
+        self._last_ob_candle_ts: int   = 0    # ts of last candle we scanned (dedup)
+
         # Execution timestamp — set in _execute(), must be initialized to prevent
         # AttributeError when _serialize() is called after restart in MANAGING_POSITION
         self.execution_time_ist: str = ""
@@ -157,6 +165,8 @@ class BaseExecutor:
         bus.subscribe(TICK_FUTURES,    self._on_price)
         bus.subscribe(SQUAREOFF_START, self._on_squareoff_broadcast)
         bus.subscribe(SET_LINES,       self._on_set_lines)
+        from backend.message_bus import CANDLE_CLOSE
+        bus.subscribe(CANDLE_CLOSE,    self._on_candle_close)
 
         # Crash recovery from SQLite
         saved = store.get(f"{self.name}_state")
@@ -209,6 +219,7 @@ class BaseExecutor:
             await self._check_missed_fills_on_reconnect()
 
         self._main_task = asyncio.create_task(self._main_loop())
+        asyncio.create_task(self._snapshot_loop())
         self.log.info(f"{self.name} started. is_paper={self.is_paper} force_window={self.force_window}")
         await self._broadcast_position()
 
@@ -225,6 +236,120 @@ class BaseExecutor:
         if h and l:
             self.locked_high_line, self.locked_low_line = float(h), float(l)
             await self._log(f"Lines manually overridden: H={float(h):.2f}  L={float(l):.2f}")
+
+    async def _on_candle_close(self, msg: dict):
+        """
+        Fires on every CANDLE_CLOSE event. When OB wait-mode is active (no zone found
+        at window open), re-scan after each final candle on the trader's OB TF.
+        """
+        if not self._ob_wait_active:
+            return
+        d = msg.get("data", {})
+        tf_str = str(self._cfg("ob_tf") or getattr(cfg, "ob_tf", "15m"))
+        if d.get("tf") != tf_str:
+            return
+        candle = d.get("candle", {})
+        if not candle.get("is_final"):
+            return
+        candle_ts = int(candle.get("ts", 0))
+        if candle_ts == self._last_ob_candle_ts:
+            return  # already processed this candle
+        self._last_ob_candle_ts = candle_ts
+
+        # Only scan when inside the trading window
+        n = ist_now()
+        _exp_h = int(getattr(cfg, "session_expiry_h", 13))
+        _exp_m = int(getattr(cfg, "session_expiry_m", 30))
+        def _ci(key, default): v = self._cfg(key); return int(v) if v is not None else default
+        _ts_h = _ci("trade_start_h", 4); _ts_m = _ci("trade_start_m", 0)
+        _te_h = _ci("trade_end_h", 18);  _te_m = _ci("trade_end_m", 30)
+        in_window = self.force_window or is_in_session_range(
+            n.hour, n.minute, _ts_h, _ts_m, _te_h, _te_m, _exp_h, _exp_m
+        )
+        if not in_window:
+            return
+
+        await self._try_ob_from_candle_close()
+
+    async def _try_ob_from_candle_close(self):
+        """
+        Called when a new candle closes on the trader's OB TF while in wait-mode.
+        Re-runs OB detection. If the required zone now exists, locks it and
+        transitions to CHECK_ELIGIBILITY for the normal eligibility flow.
+        """
+        from backend.data.futures_feed import get_candles, fetch_historical_candles
+        from backend.data.order_blocks import detect
+
+        n_candles = int(getattr(cfg, "ob_candle_count", 500))
+        tf_str    = str(self._cfg("ob_tf") or getattr(cfg, "ob_tf", "15m"))
+        zone_type = "demand" if self.direction == "BULLISH" else "supply"
+
+        candles = get_candles(n_candles, tf_str)
+        if len(candles) < max(n_candles // 2, 10):
+            candles = await fetch_historical_candles(n_candles, tf_str)
+        if not candles:
+            return
+
+        result = detect(candles)
+        zones  = result.get(zone_type, [])
+        if not zones:
+            return  # still no zone — keep waiting
+
+        zone        = zones[0]
+        target_line = float(zone["mid"])
+        now_str     = ist_now_str()
+
+        _exp_h   = int(getattr(cfg, "session_expiry_h", 13))
+        _exp_m   = int(getattr(cfg, "session_expiry_m", 30))
+        ses_day  = get_session_day(ist_now(), _exp_h, _exp_m)
+
+        # Lock the zone — identical fields to what _run_ob_analysis sets
+        self.analysis_report = {
+            "ob_zone":               zone,
+            "ob_type":               zone_type,
+            "selected_line":         zone["mid"],
+            "current_price":         result.get("current_price", 0),
+            "candle_count":          result.get("candle_count", 0),
+            "tf":                    tf_str,
+            "all_demand":            result.get("demand", []),
+            "all_supply":            result.get("supply", []),
+            "analysis_time":         now_str,
+            "ob_formed_during_window": True,
+            "ob_wait_started":       self._ob_wait_since,
+            "ob_wait_reason":        self._ob_wait_reason,
+        }
+        self.locked_high_line = target_line
+        self.locked_low_line  = target_line
+        self.high_line        = float(zone.get("top",    target_line))
+        self.low_line         = float(zone.get("bottom", target_line))
+        self._ob_wait_active  = False
+
+        # Persist OB history — update the existing "waiting" row
+        await store.update_ob_record(
+            self.name, ses_day, tf_str,
+            status="formed_during_window",
+            zone_top=zone["top"], zone_bottom=zone["bottom"],
+            zone_mid=zone["mid"], zone_score=zone["score"],
+            zone_grade=zone["grade"], found_at_ts=now_str, locked_at_ts=now_str,
+        )
+
+        await self._log(
+            f"NEW {zone_type.upper()} OB formed during window → "
+            f"${zone.get('bottom', 0):.0f}–${zone.get('top', 0):.0f} "
+            f"| mid={target_line:.0f} | {zone.get('grade', '')} "
+            f"(score={zone.get('score', 0)}) | locked at {now_str}"
+        )
+        await self._log_session_event("ob_locked_during_window",
+            f"{zone_type} OB ${zone.get('bottom',0):.0f}-${zone.get('top',0):.0f} "
+            f"mid={target_line:.0f} grade={zone.get('grade','')} formed and locked")
+
+        # Transition to CHECK_ELIGIBILITY — _do_eligibility_check will detect
+        # today_analyzed=True (analysis_report + locked_high_line are set) and
+        # skip the OB fetch, going straight to the eligibility/proximity check.
+        if self.state == ExState.SLEEP:
+            self.state = ExState.CHECK_ELIGIBILITY
+        await self._save_state()
+        await self._broadcast_position()
 
     async def _on_price(self, msg: dict):
         d = msg.get("data", {})
@@ -369,18 +494,28 @@ class BaseExecutor:
         # ── SLEEP ────────────────────────────────────────────────────────────
         if self.state == ExState.SLEEP:
             if in_window:
-                # If already determined INELIGIBLE today, stay SLEEP — no re-check
-                # UNLESS price has since moved into eligibility range (e.g. OB approached)
-                if self._eligibility_date == session_day and self.eligible_today is False:
-                    tl = self.locked_high_line or self.locked_low_line
-                    if tl and self._is_eligible(p, tl):
-                        pass  # price now in range — fall through to re-evaluate
-                    else:
+                # Guard A: Zone found but price too far — watch every tick until price approaches
+                if (self.locked_high_line
+                        and self._eligibility_date == session_day
+                        and self.eligible_today is not True):
+                    if not self._is_eligible(p, self.locked_high_line):
+                        # Price still outside tolerance — keep publishing, don't re-run analysis
                         await self._publish_monitor(p, in_window)
                         return
-                # If analysis failed (no candle data), wait for retry cooldown
-                retry_after = getattr(self, "_analysis_retry_after", 0)
-                if retry_after and time.time() < retry_after:
+                    # Price just entered tolerance window → fall through to re-check eligibility
+
+                # Guard B: Candle-data failure with retry cooldown (no locked zone)
+                if (self._eligibility_date == session_day
+                        and self.eligible_today is False
+                        and not self.locked_high_line):
+                    retry_after = getattr(self, "_analysis_retry_after", 0)
+                    if retry_after and time.time() < retry_after:
+                        await self._publish_monitor(p, in_window)
+                        return
+                    # Retry cooldown expired — fall through to re-run analysis
+
+                # Guard C: OB wait-mode — no zone yet, watching for candle-close
+                if getattr(self, "_ob_wait_active", False):
                     await self._publish_monitor(p, in_window)
                     return
                 # Mark session start — clears previous session's trades (in-memory only)
@@ -489,30 +624,57 @@ class BaseExecutor:
                 f"Fetching Order Block zones at window open | "
                 f"direction={self.direction} → nearest {zone_type} zone"
             )
+            await self._log_session_event("window_open",
+                f"direction={self.direction} tf={self._cfg('ob_tf') or getattr(cfg,'ob_tf','15m')} price={price:.0f}")
             await self._publish_monitor(price, in_window)
             try:
                 target_line = await self._run_ob_analysis()
                 if not target_line:
-                    error_msg = self.analysis_report.get("error", "no zone found")
+                    error_msg  = self.analysis_report.get("error", "no zone found")
                     no_candles = "candle" in error_msg.lower()
                     if no_candles:
+                        # Data not ready — retry in 5 min via main loop cooldown
                         await self._log(
                             f"OB analysis failed: {error_msg}. Will retry in 5 minutes.",
                             level="WARNING"
                         )
                         self._analysis_retry_after = time.time() + 300
+                        self._eligibility_date = session_day
+                        self.eligible_today    = False
+                        self.locked_high_line  = None
+                        self.locked_low_line   = None
+                        self.state = ExState.SLEEP
+                        return
                     else:
+                        # No zone at window open — enter OB wait-mode.
+                        # Stay SLEEP but do NOT mark ineligible; candle-close handler
+                        # will re-scan and lock the zone as soon as one forms.
+                        now_str = ist_now_str()
+                        self._ob_wait_active  = True
+                        self._ob_wait_since   = now_str
+                        self._ob_wait_reason  = error_msg
                         await self._log(
-                            f"No qualifying {zone_type} OB zone: {error_msg}. "
-                            f"Ineligible today.",
+                            f"No {zone_type} OB at window open ({now_str}) — "
+                            f"entering OB WAIT MODE on {self._cfg('ob_tf') or getattr(cfg,'ob_tf','15m')} TF. "
+                            f"Will lock zone immediately when one forms before window close.",
                             level="WARNING"
                         )
-                    self._eligibility_date = session_day
-                    self.eligible_today    = False
-                    self.locked_high_line  = None
-                    self.locked_low_line   = None
-                    self.state = ExState.SLEEP
-                    return
+                        await self._log_session_event("ob_wait_start",
+                            f"No {zone_type} zone at window open. Watching for new OB on "
+                            f"{self._cfg('ob_tf') or getattr(cfg,'ob_tf','15m')} TF. reason={error_msg}")
+                        # Record the wait in ob_history for cross-verification
+                        await store.save_ob_record(
+                            trader_name=self.name, session_date=session_day,
+                            tf=str(self._cfg("ob_tf") or getattr(cfg, "ob_tf", "15m")),
+                            zone_type=zone_type, status="waiting",
+                            wait_started_ts=now_str, notes=error_msg,
+                        )
+                        self._eligibility_date = session_day
+                        self.eligible_today    = None   # not yet decided — zone may form
+                        self.locked_high_line  = None
+                        self.locked_low_line   = None
+                        self.state = ExState.SLEEP
+                        return
             finally:
                 self._is_analyzing = False
 
@@ -523,6 +685,16 @@ class BaseExecutor:
             # display lines = zone boundaries so chart shows full zone band
             self.high_line = float(zone.get("top",    target_line))
             self.low_line  = float(zone.get("bottom", target_line))
+            # Save OB history — zone was available right at window open
+            await store.save_ob_record(
+                trader_name=self.name, session_date=session_day,
+                tf=str(self._cfg("ob_tf") or getattr(cfg, "ob_tf", "15m")),
+                zone_type=zone_type, status="available_at_open",
+                zone_top=zone.get("top"), zone_bottom=zone.get("bottom"),
+                zone_mid=zone.get("mid"), zone_score=zone.get("score"),
+                zone_grade=zone.get("grade"),
+                found_at_ts=ist_now_str(), locked_at_ts=ist_now_str(),
+            )
             await self._log(
                 f"OB analysis complete → {zone_type.upper()} zone "
                 f"${zone.get('bottom', 0):.0f}–${zone.get('top', 0):.0f} "
@@ -545,8 +717,16 @@ class BaseExecutor:
         if not eligible:
             zone_reason = self._ineligible_reason(price, target)
             await self._log(
-                f"INELIGIBLE: {zone_reason}  Price={price:.2f}  Line={target:.2f}"
+                f"Price too far from {zone_type} OB zone — entering WATCH mode. "
+                f"{zone_reason}",
+                level="WARNING"
             )
+            await self._log_session_event("price_watch",
+                f"{zone_type} OB locked at ${target:.0f}. {zone_reason}")
+            # Do NOT mark eligible_today=False — keep as None so SLEEP Guard A
+            # re-checks every tick and transitions to VERIFY_HEDGE_LOOP the moment
+            # price enters ±max_distance_from_line of the locked zone mid.
+            self.eligible_today = None
             self.state = ExState.SLEEP
             return
 
@@ -740,14 +920,8 @@ class BaseExecutor:
         # Futures unrealized PnL (mark-to-market, Binance style)
         fut_pnl = self._futures_unrealized_pnl(price, self.futures_remaining_qty)
 
-        # Hedge unrealized PnL — Binance style: mark → bid → intrinsic
-        from backend.data.options_feed import get_chain
-        chain     = get_chain()
-        opt       = chain.get(self.hedge_symbol, {})
-        mark_p    = float(opt.get("mark",      0) or 0)
-        bid_p     = float(opt.get("bid",       0) or 0)
-        intr_p    = float(opt.get("intrinsic", 0) or 0)
-        cur_val   = mark_p if mark_p > 0 else (bid_p if bid_p > 0 else intr_p)
+        # Hedge unrealized PnL — intrinsic always computed from live BTC price
+        cur_val   = self._hedge_current_value(price)
         hedge_pnl = (cur_val - self.hedge_fill_price) * self.hedge_qty
         total_pnl = fut_pnl + hedge_pnl
 
@@ -942,6 +1116,9 @@ class BaseExecutor:
         self._update_last_trigger_result("executed")
         await self._save_state()
         await self._broadcast_position()
+        await self._log_session_event("trade_entered",
+            f"hedge={sym} @{fill_px:.2f} futures={self._futures_side} @{fut_px:.2f} "
+            f"premium={self.hedge_premium_paid:.2f}")
 
         # Persist ALL trades to structured SQLite paper_trades table
         # Pass the exact execution timestamp so DB records match actual order time.
@@ -1224,10 +1401,18 @@ class BaseExecutor:
             self.locked_low_line   = None
             self.high_line         = None
             self.low_line          = None
+            self._ob_wait_active   = False
+            self._ob_wait_since    = ""
+            self._ob_wait_reason   = ""
+            self._last_ob_candle_ts = 0
             # Keep analysis_report after squareoff — it's valid historical data for display.
             # eligible_today=False already prevents re-entry, so stale report can't cause harm.
             self.session_start_ts  = 0.0
             await self._log("Squareoff complete. Ineligible for rest of today.")
+            await self._log_session_event("squareoff",
+                f"fut_pnl={self.session_realized_futures_pnl:+.2f} "
+                f"hedge_pnl={self.session_realized_hedge_pnl:+.2f} "
+                f"total={self.session_realized_futures_pnl+self.session_realized_hedge_pnl:+.2f}")
             # Mark the session as force-closed so it doesn't appear in journal
             if self.execution_time_ist:
                 sid = self.execution_time_ist.replace(" ", "_").replace(":", "-")
@@ -1259,11 +1444,11 @@ class BaseExecutor:
         if not self.hedge_symbol or not self.hedge_qty:
             return
 
-        chain    = get_chain()
-        opt_now  = chain.get(self.hedge_symbol, {})
-        intr_now = float(opt_now.get("intrinsic", 0) or 0)
-        bid_now  = float(opt_now.get("bid", 0) or 0)
-        limit_px = max(bid_now, intr_now * 0.98) if intr_now > 0 else bid_now
+        opt_now   = get_chain().get(self.hedge_symbol, {})
+        bid_now   = float(opt_now.get("bid", 0) or 0)
+        # Use helper so intrinsic is computed from live BTC price, not chain's stale field
+        fair_val  = self._hedge_current_value(self.current_price)
+        limit_px  = bid_now if bid_now > 0 else (fair_val * 0.98 if fair_val > 0 else 0)
 
         if self.is_paper:
             fill = await paper.sell_option(self.hedge_symbol, self.hedge_qty,
@@ -1322,14 +1507,8 @@ class BaseExecutor:
         fut_pnl   = 0.0
         if self.hedge_symbol and self.state in (
                 ExState.MANAGING_POSITION, ExState.PARTIAL_BOOKING):
-            from backend.data.options_feed import get_chain
-            opt  = get_chain().get(self.hedge_symbol, {})
-            mark = float(opt.get("mark",      0) or 0)
-            bid  = float(opt.get("bid",       0) or 0)
-            intr = float(opt.get("intrinsic", 0) or 0)
-            # Binance-style unrealized: mark → bid → intrinsic
-            cur_val = mark if mark > 0 else (bid if bid > 0 else intr)
-            if cur_val > 0:
+            cur_val = self._hedge_current_value(price)
+            if cur_val > 0 or self.hedge_fill_price > 0:
                 hedge_pnl = (cur_val - self.hedge_fill_price) * self.hedge_qty
             if self.futures_remaining_qty:
                 fut_pnl = self._futures_unrealized_pnl(price, self.futures_remaining_qty)
@@ -1346,6 +1525,10 @@ class BaseExecutor:
             "locked_low_line":  self.locked_low_line,
             "in_window":       in_window,
             "ts_ist":          ist_now_str(),
+            # OB wait-mode transparency
+            "ob_wait_active":  self._ob_wait_active,
+            "ob_wait_since":   self._ob_wait_since,
+            "ob_wait_reason":  self._ob_wait_reason,
             # Eligibility / trigger / zone
             "eligible":        self.eligible_today,
             "entry_zone":      self.entry_zone,
@@ -1378,15 +1561,8 @@ class BaseExecutor:
         if self.futures_remaining_qty and price:
             fut_pnl = self._futures_unrealized_pnl(price, self.futures_remaining_qty)
         if self.hedge_symbol and self.hedge_fill_price:
-            from backend.data.options_feed import get_chain
-            opt  = get_chain().get(self.hedge_symbol, {})
-            mark = float(opt.get("mark",      0) or 0)
-            bid  = float(opt.get("bid",       0) or 0)
-            intr = float(opt.get("intrinsic", 0) or 0)
-            # Binance-style: mark → bid → intrinsic
-            cur_val = mark if mark > 0 else (bid if bid > 0 else intr)
-            if cur_val > 0:
-                hedge_pnl = (cur_val - self.hedge_fill_price) * self.hedge_qty
+            cur_val   = self._hedge_current_value(price)
+            hedge_pnl = (cur_val - self.hedge_fill_price) * self.hedge_qty
 
         await bus.publish(POSITION_UPDATE, {
             "executor":                 self.name,
@@ -1399,6 +1575,10 @@ class BaseExecutor:
             "locked_high_line":         self.locked_high_line,
             "locked_low_line":          self.locked_low_line,
             "in_window":                self.force_window or self._in_window(),
+            # OB wait-mode transparency
+            "ob_wait_active":           self._ob_wait_active,
+            "ob_wait_since":            self._ob_wait_since,
+            "ob_wait_reason":           self._ob_wait_reason,
             "eligible":                 self.eligible_today,
             "trigger_type":             self.trigger_type,
             "triggered":                self.triggered,
@@ -1441,6 +1621,38 @@ class BaseExecutor:
 
     # ── Helpers ────────────────────────────────────────────────────────────
 
+    def _hedge_current_value(self, btc_price: float) -> float:
+        """
+        Returns the best available current value of the open hedge option.
+
+        Intrinsic is ALWAYS recomputed from the live BTC mark price — never trusted
+        from the options chain's stored 'intrinsic' field, which can be stale or
+        computed against a zero price during WebSocket gaps (producing strike-sized
+        errors like max(62500-0,0)=62500 instead of max(62500-62611,0)=0).
+
+        Priority: exchange mark → exchange bid → computed intrinsic → 0
+        """
+        if not self.hedge_symbol:
+            return 0.0
+        try:
+            from backend.data.options_feed import get_chain
+            opt  = get_chain().get(self.hedge_symbol, {})
+            mark = float(opt.get("mark", 0) or 0)
+            bid  = float(opt.get("bid",  0) or 0)
+            # Recompute intrinsic from current verified BTC price
+            parts  = self.hedge_symbol.split("-")   # BTC-YYMMDD-STRIKE-C/P
+            strike = float(parts[2]) if len(parts) >= 4 else 0.0
+            if strike > 0 and btc_price > 0:
+                if self._option_side == "P":
+                    intr = max(strike - btc_price, 0.0)
+                else:
+                    intr = max(btc_price - strike, 0.0)
+            else:
+                intr = 0.0
+            return mark if mark > 0 else (bid if bid > 0 else intr)
+        except Exception:
+            return 0.0
+
     def _in_window(self) -> bool:
         if self.force_window:
             return True
@@ -1471,6 +1683,43 @@ class BaseExecutor:
             "message": message,
             "ts_ist":  ist_now_str(),
         }, source=self.name)
+
+    async def _log_session_event(self, event_type: str, message: str = ""):
+        """Persist a key event to session_event_log for historical review."""
+        try:
+            _exp_h   = int(getattr(cfg, "session_expiry_h", 13))
+            _exp_m   = int(getattr(cfg, "session_expiry_m", 30))
+            ses_day  = get_session_day(ist_now(), _exp_h, _exp_m)
+            await store.save_session_event(
+                trader_name=self.name,
+                session_date=ses_day,
+                event_ts_ist=ist_now_str(),
+                event_type=event_type,
+                state=self.state.value,
+                price=round(self.current_price, 1),
+                locked_line=round(self.locked_high_line or 0, 1),
+                message=message,
+            )
+        except Exception as e:
+            self.log.debug(f"_log_session_event failed: {e}")
+
+    async def _snapshot_loop(self):
+        """Save a state snapshot every 5 minutes for session timeline view."""
+        import asyncio as _aio
+        while True:
+            await _aio.sleep(300)
+            try:
+                if self._in_window() or self.state not in (ExState.SLEEP,):
+                    await self._log_session_event(
+                        "snapshot",
+                        f"state={self.state.value} "
+                        f"price={self.current_price:.0f} "
+                        f"ob_wait={self._ob_wait_active} "
+                        f"eligible={self.eligible_today} "
+                        f"locked={self.locked_high_line:.0f if self.locked_high_line else 'none'}"
+                    )
+            except Exception:
+                pass
 
     async def _check_missed_fills_on_reconnect(self):
         """
@@ -1653,6 +1902,10 @@ class BaseExecutor:
         # Does NOT block all day so fresh analysis + re-entry is still possible
         self._analysis_retry_after = time.time() + 600
         self.eligible_today        = None   # allow fresh analysis after cooldown
+        self._ob_wait_active       = False
+        self._ob_wait_since        = ""
+        self._ob_wait_reason       = ""
+        self._last_ob_candle_ts    = 0
         # ── Persist both paper engine and executor state to DB ────────────
         if self._paper is not None:
             await self._paper.save_state()                 # ensures cleared positions survive restart
@@ -1683,6 +1936,10 @@ class BaseExecutor:
         self._eligibility_date     = ""
         self.eligible_today        = None
         self._analysis_retry_after = 0.0
+        self._ob_wait_active     = False
+        self._ob_wait_since      = ""
+        self._ob_wait_reason     = ""
+        self._last_ob_candle_ts  = 0
         # In pre-execution states: go back to SLEEP so analysis re-runs immediately
         _pre_exec = {ExState.SLEEP, ExState.CHECK_ELIGIBILITY,
                      ExState.WAIT_TRIGGER, ExState.VERIFY_HEDGE_LOOP}
@@ -1739,6 +1996,10 @@ class BaseExecutor:
         self.locked_low_line     = None
         self.high_line           = None   # clear display lines too
         self.low_line            = None
+        self._ob_wait_active     = False  # clear OB wait state for new session
+        self._ob_wait_since      = ""
+        self._ob_wait_reason     = ""
+        self._last_ob_candle_ts  = 0
         # Preserve analysis_report within the same session so the panel still shows
         # the last known OB zone during brief gaps between retries.
         # Only wipe it when the SESSION changes (not at calendar midnight).
@@ -1817,6 +2078,10 @@ class BaseExecutor:
             "session_realized_hedge_pnl":      self.session_realized_hedge_pnl,
             "session_start_ts":                self.session_start_ts,
             "analysis_retry_after":            self._analysis_retry_after,
+            "ob_wait_active":                  self._ob_wait_active,
+            "ob_wait_since":                   self._ob_wait_since,
+            "ob_wait_reason":                  self._ob_wait_reason,
+            "last_ob_candle_ts":               self._last_ob_candle_ts,
         }
 
     def _restore_state(self, s: dict):
@@ -1871,6 +2136,10 @@ class BaseExecutor:
             self.session_realized_hedge_pnl   = s.get("session_realized_hedge_pnl", 0.0)
             self.session_start_ts             = s.get("session_start_ts", 0.0)
             self._analysis_retry_after        = s.get("analysis_retry_after", 0.0)
+            self._ob_wait_active              = s.get("ob_wait_active", False)
+            self._ob_wait_since               = s.get("ob_wait_since", "")
+            self._ob_wait_reason              = s.get("ob_wait_reason", "")
+            self._last_ob_candle_ts           = s.get("last_ob_candle_ts", 0)
             # If restoring mid-verification, reset timer to NOW so timeout is fresh
             if self.state == ExState.VERIFY_HEDGE_LOOP:
                 self._verify_start_time = time.time()

@@ -349,18 +349,98 @@ async def get_order_blocks(n: int = 500, tf: str = "5m"):
     """
     Detect active demand/supply order block zones from recent BTC candles.
     Returns fresh zones scoring ≥58 (grade B or better): A+ ≥86, A ≥74, B ≥58.
+    Each zone includes: born_ts, created_ist, expiry_ts, expiry_ist, bars_remaining.
     """
     from backend.data.futures_feed import get_candles as gc, fetch_historical_candles
     from backend.data.order_blocks import detect
+    import datetime as _dt
+
     candles = gc(n, tf)
     tf_secs = _TF_SECONDS.get(tf, 300)
     latest_ts = candles[-1]["ts"] / 1000 if candles else 0
     if len(candles) < n or (time.time() - latest_ts) > 2 * tf_secs:
         candles = await fetch_historical_candles(n, tf)
     result = detect(candles)
+
+    # Enrich zones with human-readable timestamps and expiry info
+    max_zone_age = int(getattr(cfg, "ob_max_zone_age", 200))
+    tf_ms        = tf_secs * 1000
+    _IST = _dt.timezone(_dt.timedelta(hours=5, minutes=30))
+
+    def _enrich(zones):
+        out = []
+        for z in zones:
+            born_ms  = z.get("born_ts", 0)           # epoch ms of origin candle open
+            exp_ms   = born_ms + max_zone_age * tf_ms # epoch ms when zone expires by age
+            bars_rem = max_zone_age - z.get("age_bars", 0)
+            def _ist(ms):
+                if not ms: return "—"
+                return _dt.datetime.fromtimestamp(ms / 1000, tz=_IST).strftime("%Y-%m-%d %H:%M")
+            out.append({
+                **z,
+                "created_ist":   _ist(born_ms),
+                "expiry_ts":     exp_ms,
+                "expiry_ist":    _ist(exp_ms),
+                "bars_remaining": max(bars_rem, 0),
+                "tf":             tf,
+            })
+        return out
+
+    result["demand"] = _enrich(result.get("demand", []))
+    result["supply"] = _enrich(result.get("supply", []))
     result["ts_ist"] = ist_now_str()
-    result["tf"] = tf
+    result["tf"]     = tf
+    result["tf_secs"] = tf_secs
+    result["max_zone_age"] = max_zone_age
+
+    # Persist every zone to ob_snapshot table so historical records are maintained
+    # even when zones expire or get invalidated. Uses "snapshot" source — distinct
+    # from trader-locked records (status=available_at_open / formed_during_window).
+    today_str = ist_now_str()[:10]  # YYYY-MM-DD
+    for z in result["demand"] + result["supply"]:
+        try:
+            await store.save_ob_record(
+                trader_name="__snapshot__",
+                session_date=today_str,
+                tf=tf,
+                zone_type="demand" if z.get("is_demand") else "supply",
+                status="active",
+                born_ts=int(z.get("born_ts", 0) or 0),
+                zone_top=z.get("top"), zone_bottom=z.get("bottom"),
+                zone_mid=z.get("mid"), zone_score=z.get("score"),
+                zone_grade=z.get("grade"),
+                found_at_ts=z.get("created_ist", ""),
+                locked_at_ts=z.get("expiry_ist", ""),
+                notes=f"age={z.get('age_bars',0)} bars_left={z.get('bars_remaining',0)}",
+            )
+        except Exception:
+            pass
+
     return result
+
+
+@app.get("/api/session-log")
+async def get_session_log(trader: str, date: str = "", limit: int = 500):
+    """
+    Session timeline log for a trader.
+    event_type: window_open | ob_wait_start | ob_locked_during_window | price_watch |
+                trade_entered | squareoff | snapshot
+    ?trader=BullishExecutor_Paper&date=2026-06-07&limit=500
+    """
+    events = await store.get_session_events(trader_name=trader, session_date=date, limit=limit)
+    dates  = await store.get_session_dates(trader_name=trader, limit=30)
+    return {"events": events, "session_dates": dates, "count": len(events), "ts_ist": ist_now_str()}
+
+
+@app.get("/api/ob-history")
+async def get_ob_history_endpoint(trader: str = "", date: str = "", limit: int = 50):
+    """
+    OB zone history log — every session's order block status per trader.
+    status values: available_at_open | formed_during_window | waiting | not_found
+    Use ?trader=BullishExecutor&date=2026-06-06&limit=50 to filter.
+    """
+    rows = await store.get_ob_history(trader_name=trader, session_date=date, limit=limit)
+    return {"records": rows, "count": len(rows), "ts_ist": ist_now_str()}
 
 
 @app.get("/api/events/forecast")

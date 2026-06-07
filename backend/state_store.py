@@ -94,6 +94,41 @@ CREATE TABLE IF NOT EXISTS trade_log (
     detail     TEXT,
     is_paper   INTEGER DEFAULT 1
 );
+
+CREATE TABLE IF NOT EXISTS session_event_log (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    trader_name  TEXT    NOT NULL,
+    session_date TEXT    NOT NULL,
+    event_ts_ist TEXT    NOT NULL,
+    event_type   TEXT    NOT NULL,
+    state        TEXT,
+    price        REAL,
+    locked_line  REAL,
+    message      TEXT,
+    created_at   REAL    DEFAULT (strftime('%s','now'))
+);
+CREATE INDEX IF NOT EXISTS idx_sel_trader_date ON session_event_log(trader_name, session_date DESC);
+
+CREATE TABLE IF NOT EXISTS ob_history (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    trader_name      TEXT    NOT NULL,
+    session_date     TEXT    NOT NULL,
+    tf               TEXT    NOT NULL,
+    zone_type        TEXT    NOT NULL,
+    status           TEXT    NOT NULL,
+    born_ts          INTEGER,
+    zone_top         REAL,
+    zone_bottom      REAL,
+    zone_mid         REAL,
+    zone_score       REAL,
+    zone_grade       TEXT,
+    wait_started_ts  TEXT,
+    found_at_ts      TEXT,
+    locked_at_ts     TEXT,
+    notes            TEXT,
+    created_at       REAL    DEFAULT (strftime('%s','now'))
+);
+CREATE INDEX IF NOT EXISTS idx_ob_trader_date ON ob_history(trader_name, session_date DESC);
 """
 
 
@@ -136,12 +171,26 @@ class StateStore:
     def _sqlite_init(self):
         with sqlite3.connect(self._db_path) as c:
             c.executescript(_SCHEMA)
-        # Migration: add is_force_closed if not present
+        # Migrations — each wrapped in try/except since the column may already exist
         with sqlite3.connect(self._db_path) as c:
             try:
                 c.execute("ALTER TABLE trading_sessions ADD COLUMN is_force_closed INTEGER DEFAULT 0")
             except Exception:
-                pass  # column already exists
+                pass
+        # session_event_log: schema handles creation; no column migrations needed yet
+        # ob_history migrations — run in order before index creation
+        with sqlite3.connect(self._db_path) as c:
+            for ddl in [
+                "ALTER TABLE ob_history ADD COLUMN born_ts INTEGER",
+            ]:
+                try: c.execute(ddl)
+                except Exception: pass
+            # Partial unique index for snapshot dedup — must be after born_ts column exists
+            try:
+                c.execute("""CREATE UNIQUE INDEX IF NOT EXISTS idx_ob_snapshot_dedup
+                             ON ob_history(trader_name, tf, born_ts)
+                             WHERE trader_name='__snapshot__'""")
+            except Exception: pass
 
     def _sqlite_load_all(self):
         with sqlite3.connect(self._db_path) as c:
@@ -484,6 +533,192 @@ class StateStore:
             "high_line": high_line, "low_line": low_line,
             "candidates": candidates, "touches": touches,
         })
+
+    # ── Session Event Log ──────────────────────────────────────────────────
+
+    def _sqlite_insert_session_event(self, row: dict):
+        with sqlite3.connect(self._db_path) as c:
+            c.execute(
+                """INSERT INTO session_event_log
+                   (trader_name, session_date, event_ts_ist, event_type,
+                    state, price, locked_line, message)
+                   VALUES (?,?,?,?,?,?,?,?)""",
+                (row["trader_name"], row["session_date"], row["event_ts_ist"],
+                 row["event_type"], row.get("state"), row.get("price"),
+                 row.get("locked_line"), row.get("message", "")),
+            )
+
+    def _sqlite_get_session_events(self, trader_name: str,
+                                    session_date: str, limit: int) -> list:
+        with sqlite3.connect(self._db_path) as c:
+            c.row_factory = sqlite3.Row
+            clauses, params = ["trader_name=?"], [trader_name]
+            if session_date:
+                clauses.append("session_date=?"); params.append(session_date)
+            params.append(limit)
+            rows = c.execute(
+                f"SELECT * FROM session_event_log WHERE {' AND '.join(clauses)} "
+                f"ORDER BY created_at ASC LIMIT ?",
+                params,
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    async def save_session_event(self, trader_name: str, session_date: str,
+                                  event_ts_ist: str, event_type: str,
+                                  state: str = "", price: float = 0.0,
+                                  locked_line: float = 0.0, message: str = ""):
+        row = {
+            "trader_name": trader_name, "session_date": session_date,
+            "event_ts_ist": event_ts_ist, "event_type": event_type,
+            "state": state, "price": price or None,
+            "locked_line": locked_line or None, "message": message,
+        }
+        if self._db_path:
+            loop = asyncio.get_running_loop()
+            try:
+                await loop.run_in_executor(_pool, self._sqlite_insert_session_event, row)
+            except Exception as e:
+                log.error(f"save_session_event error: {e}")
+
+    async def get_session_events(self, trader_name: str, session_date: str = "",
+                                  limit: int = 500) -> list:
+        if not self._db_path:
+            return []
+        loop = asyncio.get_running_loop()
+        try:
+            return await loop.run_in_executor(
+                _pool, self._sqlite_get_session_events,
+                trader_name, session_date, limit
+            )
+        except Exception as e:
+            log.error(f"get_session_events error: {e}")
+            return []
+
+    def _sqlite_get_session_dates(self, trader_name: str, limit: int) -> list:
+        with sqlite3.connect(self._db_path) as c:
+            rows = c.execute(
+                """SELECT DISTINCT session_date FROM session_event_log
+                   WHERE trader_name=? ORDER BY session_date DESC LIMIT ?""",
+                (trader_name, limit),
+            ).fetchall()
+        return [r[0] for r in rows]
+
+    async def get_session_dates(self, trader_name: str, limit: int = 30) -> list:
+        if not self._db_path:
+            return []
+        loop = asyncio.get_running_loop()
+        try:
+            return await loop.run_in_executor(
+                _pool, self._sqlite_get_session_dates, trader_name, limit
+            )
+        except Exception as e:
+            return []
+
+    # ── OB History ─────────────────────────────────────────────────────────
+
+    def _sqlite_upsert_ob_record(self, row: dict):
+        with sqlite3.connect(self._db_path) as c:
+            # INSERT OR IGNORE: snapshot records deduplicated by (trader_name, tf, born_ts)
+            # via the partial unique index; trader records always insert fresh rows.
+            c.execute(
+                """INSERT OR IGNORE INTO ob_history
+                   (trader_name, session_date, tf, zone_type, status, born_ts,
+                    zone_top, zone_bottom, zone_mid, zone_score, zone_grade,
+                    wait_started_ts, found_at_ts, locked_at_ts, notes)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    row["trader_name"], row["session_date"], row["tf"],
+                    row["zone_type"], row["status"], row.get("born_ts"),
+                    row.get("zone_top"), row.get("zone_bottom"), row.get("zone_mid"),
+                    row.get("zone_score"), row.get("zone_grade"),
+                    row.get("wait_started_ts"), row.get("found_at_ts"),
+                    row.get("locked_at_ts"), row.get("notes", ""),
+                ),
+            )
+
+    def _sqlite_update_ob_record(self, trader_name: str, session_date: str, tf: str,
+                                  updates: dict):
+        if not updates:
+            return
+        cols = ", ".join(f"{k}=?" for k in updates)
+        # Update the most recent row for this trader+date+tf so "waiting" becomes "formed"
+        vals = list(updates.values()) + [trader_name, session_date, tf]
+        with sqlite3.connect(self._db_path) as c:
+            c.execute(
+                f"""UPDATE ob_history SET {cols}
+                    WHERE id = (
+                        SELECT id FROM ob_history
+                        WHERE trader_name=? AND session_date=? AND tf=?
+                        ORDER BY id DESC LIMIT 1
+                    )""",
+                vals,
+            )
+
+    def _sqlite_get_ob_history(self, trader_name: Optional[str],
+                                session_date: Optional[str], limit: int) -> list:
+        with sqlite3.connect(self._db_path) as c:
+            c.row_factory = sqlite3.Row
+            clauses, params = [], []
+            if trader_name:
+                clauses.append("trader_name=?"); params.append(trader_name)
+            if session_date:
+                clauses.append("session_date=?"); params.append(session_date)
+            where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
+            params.append(limit)
+            rows = c.execute(
+                f"SELECT * FROM ob_history {where} ORDER BY created_at DESC LIMIT ?",
+                params,
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    async def save_ob_record(self, trader_name: str, session_date: str, tf: str,
+                              zone_type: str, status: str,
+                              born_ts: int = 0,
+                              zone_top=None, zone_bottom=None, zone_mid=None,
+                              zone_score=None, zone_grade=None,
+                              wait_started_ts: str = "", found_at_ts: str = "",
+                              locked_at_ts: str = "", notes: str = ""):
+        row = {
+            "trader_name": trader_name, "session_date": session_date,
+            "tf": tf, "zone_type": zone_type, "status": status,
+            "born_ts": born_ts or None,
+            "zone_top": zone_top, "zone_bottom": zone_bottom, "zone_mid": zone_mid,
+            "zone_score": zone_score, "zone_grade": zone_grade,
+            "wait_started_ts": wait_started_ts, "found_at_ts": found_at_ts,
+            "locked_at_ts": locked_at_ts, "notes": notes,
+        }
+        if self._db_path:
+            loop = asyncio.get_running_loop()
+            try:
+                await loop.run_in_executor(_pool, self._sqlite_upsert_ob_record, row)
+            except Exception as e:
+                log.error(f"save_ob_record error: {e}")
+
+    async def update_ob_record(self, trader_name: str, session_date: str, tf: str,
+                                **updates):
+        if self._db_path:
+            loop = asyncio.get_running_loop()
+            try:
+                await loop.run_in_executor(
+                    _pool, self._sqlite_update_ob_record,
+                    trader_name, session_date, tf, updates
+                )
+            except Exception as e:
+                log.error(f"update_ob_record error: {e}")
+
+    async def get_ob_history(self, trader_name: str = "", session_date: str = "",
+                              limit: int = 50) -> list:
+        if not self._db_path:
+            return []
+        loop = asyncio.get_running_loop()
+        try:
+            return await loop.run_in_executor(
+                _pool, self._sqlite_get_ob_history,
+                trader_name or None, session_date or None, limit
+            )
+        except Exception as e:
+            log.error(f"get_ob_history error: {e}")
+            return []
 
     # ── PostgreSQL stubs ────────────────────────────────────────────────────
 

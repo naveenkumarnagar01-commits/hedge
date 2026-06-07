@@ -102,32 +102,89 @@
     }
 
     /* ── TABS ── */
-    #tabs {
-      display: flex;
-      background: #080f1d;
-      border-bottom: 1px solid #1a2540;
+    /* ── Navigation ──────────────────────────────────────────────────── */
+    #nav-bar {
       flex-shrink: 0;
-      overflow-x: auto
+      background: #05080f;
+      border-bottom: 1px solid #0f172a;
     }
+    #sec-row {
+      display: flex;
+      align-items: stretch;
+      gap: 0;
+      background: #030712;
+      border-bottom: 1px solid #0a0f1e;
+    }
+    .sec-btn {
+      padding: 9px 22px;
+      cursor: pointer;
+      color: #374151;
+      background: transparent;
+      border: none;
+      border-bottom: 3px solid transparent;
+      font-size: 11px;
+      font-weight: 600;
+      letter-spacing: .03em;
+      white-space: nowrap;
+      transition: all .2s;
+    }
+    .sec-btn:hover { color: #9ca3af; background: #080f1d; }
+    .sec-btn.on { background: #080f1d; }
 
-    .tab {
-      padding: 6px 18px;
+    #stab-row {
+      display: flex;
+      align-items: stretch;
+      padding: 0 8px;
+      gap: 2px;
+      min-height: 32px;
+    }
+    .stab-btn {
+      padding: 5px 16px;
       cursor: pointer;
       color: #4b5563;
+      background: transparent;
+      border: none;
       border-bottom: 2px solid transparent;
+      font-size: 10px;
       white-space: nowrap;
-      font-size: 11px;
-      transition: all .15s
+      transition: all .15s;
     }
+    .stab-btn:hover { color: #9ca3af; }
+    .stab-btn.on { font-weight: bold; }
 
-    .tab:hover {
-      color: #9ca3af
-    }
+    /* keep .tab for legacy code refs */
+    .tab { display: none; }
 
-    .tab.on {
-      color: #f59e0b;
-      border-bottom-color: #f59e0b
+    /* ── Live Activity Log ───────────────────────────────────────────── */
+    .tlog-wrap {
+      flex-shrink: 0;
+      border-top: 1px solid #0a0f1e;
+      background: #020609;
+      display: flex;
+      flex-direction: column;
+      height: 120px;
     }
+    .tlog-hdr {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 2px 8px;
+      background: #030712;
+      border-bottom: 1px solid #0a0f1e;
+      flex-shrink: 0;
+    }
+    .tlog-hdr span { font-size: 8px; color: #1e3a5f; text-transform: uppercase; letter-spacing: .1em; }
+    .tlog-hdr button { font-size: 8px; color: #1a2540; background: none; border: none; cursor: pointer; padding: 0 4px; }
+    .tlog-hdr button:hover { color: #4b5563; }
+    .tlog-body {
+      flex: 1;
+      overflow-y: auto;
+      padding: 2px 6px;
+      font-family: monospace;
+    }
+    .tlog-entry { display: flex; gap: 5px; padding: 1px 0; border-bottom: 1px solid #020609; }
+    .tlog-ts { color: #0f172a; font-size: 8px; flex-shrink: 0; line-height: 1.5; }
+    .tlog-msg { font-size: 8.5px; line-height: 1.4; word-break: break-word; }
 
     /* ── BODY ── */
     #body {
@@ -1093,6 +1150,123 @@
       font-weight: bold;
       font-family: monospace
     }
+    /* ── Clock-face time picker ─────────────────────────────────── */
+    #cp-root {
+      position: fixed; z-index: 30000; display: none;
+      background: #0f172a; border: 1px solid #334155; border-radius: 12px;
+      padding: 14px 16px 10px; box-shadow: 0 8px 40px rgba(0,0,0,.7);
+      user-select: none; min-width: 240px;
+    }
+    #cp-root .cp-time { font-size: 28px; font-weight: bold; color: #f59e0b;
+      text-align: center; letter-spacing: 3px; font-family: monospace; cursor: default; }
+    #cp-root .cp-mode { font-size: 9px; color: #4b5563; text-align: center;
+      margin-top: 2px; margin-bottom: 8px; text-transform: uppercase; letter-spacing: .1em; }
+    #cp-root .cp-seg  { display: inline-block; padding: 1px 6px; border-radius: 3px;
+      cursor: pointer; transition: background .15s; }
+    #cp-root .cp-seg.active { background: #f59e0b; color: #000; }
+    #cp-root .cp-seg:not(.active) { color: #4b5563; }
+    #cp-root .cp-seg:not(.active):hover { color: #f59e0b; }
+    .cp-num { cursor: pointer; transition: all .1s; }
+    .cp-num:hover circle { fill: #1e3a5f; }
+    .cp-num.cp-sel circle { fill: #f59e0b !important; }
+    .cp-num.cp-sel text  { fill: #000 !important; font-weight: bold; }
+    .cp-btn-row { display: flex; gap: 8px; justify-content: center; margin-top: 8px; }
+    .cp-btn { font-size: 10px; padding: 4px 14px; border-radius: 4px; cursor: pointer;
+      border: 1px solid #374151; background: transparent; color: #9ca3af; }
+    .cp-btn:hover { border-color: #f59e0b; color: #f59e0b; }
+    .cp-btn.cp-ok { background: #f59e0b22; border-color: #f59e0b; color: #f59e0b; }
+    /* time-pick button (replaces H:M inputs) */
+    .tpick-btn {
+      display: inline-flex; align-items: center; gap: 4px;
+      background: #0a0f1e; border: 1px solid #1e3a5f; border-radius: 5px;
+      padding: 5px 10px; cursor: pointer; font-size: 14px; font-family: monospace;
+      color: #f59e0b; font-weight: bold; letter-spacing: 1px;
+      transition: border-color .15s, background .15s;
+    }
+    .tpick-btn:hover { border-color: #f59e0b; background: #1a1200; }
+    .tpick-btn .tpick-icon { font-size: 11px; color: #4b5563; }
+    /* workflow diagram */
+    .wf-node { cursor: default; }
+    .wf-node rect { rx: 8; transition: all .3s; }
+    .wf-pulse { animation: wf-pulse-anim 1.4s ease-in-out infinite; }
+    @keyframes wf-pulse-anim {
+      0%,100% { opacity: 1; } 50% { opacity: .45; }
+    }
+
+    /* ── Professional theme enhancements ─────────────────────────────── */
+
+    /* Smoother scrollbars */
+    ::-webkit-scrollbar { width: 5px; height: 5px; }
+    ::-webkit-scrollbar-track { background: #040b14; }
+    ::-webkit-scrollbar-thumb { background: #1e2d45; border-radius: 3px; }
+    ::-webkit-scrollbar-thumb:hover { background: #2d4a6e; }
+
+    /* Header polish */
+    #hdr {
+      background: linear-gradient(135deg, #060e1d 0%, #080f1d 100%);
+      border-bottom: 1px solid #1e2d45;
+    }
+
+    /* Nav bar — sharper tab styling */
+    #sec-row { background: #040b14; border-bottom: 1px solid #1e2d45; }
+    .sec-btn { color: #475569; font-size: 11px; font-weight: 600; letter-spacing: .04em; }
+    .sec-btn:hover { color: #94a3b8; background: #060e1d; }
+    .sec-btn.on { background: #060e1d; color: #e2e8f0; }
+
+    /* Sub-tab row */
+    #nav-bar { background: #040b14; border-bottom: 1px solid #1e2d45; }
+    #stab-row { background: #040b14; }
+    .stab-btn { color: #334155; font-size: 10px; }
+    .stab-btn:hover { color: #94a3b8; }
+    .stab-btn.on { color: #e2e8f0; font-weight: 700; }
+
+    /* Cards — more depth */
+    .card {
+      background: #06101e;
+      border: 1px solid #1e2d45;
+      border-radius: 6px;
+    }
+
+    /* Session banner */
+    #session-banner {
+      background: linear-gradient(90deg, #0a1628, #060e1d, #0a1628);
+      border-bottom: 1px solid #1e2d45;
+      color: #60a5fa;
+      font-size: 10px;
+      font-weight: 600;
+      letter-spacing: .04em;
+    }
+
+    /* Accounts section label */
+    #acc-last-refresh { font-size: 8px; color: #334155; }
+
+    /* Panel background */
+    .pnl { background: #030a15; }
+
+    /* Log strip */
+    .tlog-wrap { border-top: 1px solid #1e2d45; background: #030a15; }
+    .tlog-hdr { background: #040b14; border-bottom: 1px solid #1e2d45; }
+    .tlog-hdr span { color: #1e2d45; }
+    .tlog-ts { color: #1e2d45; }
+
+    /* Workflow canvas scrollbar accent */
+    #wf-canvas::-webkit-scrollbar-thumb { background: #1e3a5f; }
+    #wf-session-strip { background: #040b14; border-top: 1px solid #1e2d45; }
+
+    /* Table rows hover */
+    tbody tr:hover { background: #06101e !important; }
+
+    /* Accounts stack section hover */
+    #acc-content { background: #030a15; }
+    #acc-tab-bar button:hover { color: #94a3b8 !important; }
+
+    /* Smooth tab active underlines for btc traders */
+    .stab-btn.on { border-bottom-color: #3b82f6; }
+
+    /* Flow animations for workflow node connections */
+    @keyframes wf-flow-anim {
+      0% { opacity: .4; } 50% { opacity: 1; } 100% { opacity: .4; }
+    }
   </style>
 </head>
 
@@ -1118,24 +1292,19 @@
     </div>
 
     <!-- ════ SESSION BANNER ════ -->
-    <div id="session-banner" style="background:#1e3a5f;color:#93c5fd;padding:4px 12px;font-size:10px;text-align:center;border-bottom:1px solid #1a2540">
+    <div id="session-banner" style="background:linear-gradient(90deg,#0a1628,#060e1d,#0a1628);color:#60a5fa;padding:5px 12px;font-size:10px;font-weight:600;letter-spacing:.04em;text-align:center;border-bottom:1px solid #1e2d45">
       SESSION | <span id="sb-range">—</span> | EXPIRY IN | <span id="sb-expiry">—</span>
     </div>
     <!-- ════ TABS ════ -->
-    <div id="tabs" style="display:flex;align-items:stretch;justify-content:space-between">
-      <div style="display:flex">
-        <div class="tab on" onclick="showTab(0)">📊 Overview</div>
-        <div class="tab" onclick="showTab(1)">📈 BTC Technicals</div>
-        <div class="tab" onclick="showTab(2)" id="tab-bull">🟢 Bullish Trader</div>
-        <div class="tab" onclick="showTab(3)" id="tab-bear">🔴 Bearish Trader</div>
-        <div class="tab" onclick="showTab(4)" id="tab-vol">⚡ Volatile Event</div>
-        <div class="tab" onclick="showTab(5)" id="tab-ob">📦 Order Blocks</div>
-        <div class="tab" onclick="showTab(6)" id="tab-manual">📖 User Manual</div>
-        <div class="tab" onclick="showTab(7)" id="tab-accounts">💰 Accounts</div>
+    <div id="nav-bar">
+      <div id="sec-row">
+        <button class="sec-btn on" id="sec-0" onclick="showSection(0)">📊 Data</button>
+        <button class="sec-btn"    id="sec-1" onclick="showSection(1)">⚡ Traders Room</button>
+        <button class="sec-btn"    id="sec-2" onclick="showSection(2)">📋 Reports</button>
+        <div style="flex:1"></div>
+        <button onclick="showSection(2,1)" style="align-self:center;margin-right:10px;background:#1e3a5f;border:1px solid #2563eb;border-radius:4px;color:#93c5fd;cursor:pointer;font-size:9px;padding:3px 10px">📖 Manual</button>
       </div>
-      <div style="display:flex;align-items:center;padding:0 10px">
-        <button onclick="showTab(6)" style="background:#1e3a5f;border:1px solid #2563eb;border-radius:4px;color:#93c5fd;cursor:pointer;font-size:10px;font-family:monospace;padding:3px 12px;letter-spacing:.04em" title="Open User Manual tab">📖 User Manual</button>
-      </div>
+      <div id="stab-row"></div>
     </div>
 
     <!-- ════ BODY ════ -->
@@ -1329,23 +1498,38 @@
       </div>
 
       <!-- ════════════════════════════ TAB 2 · BULLISH TRADER ════════════════════════ -->
-      <div class="pnl" id="p2">
-        <div id="trader-bull-root" style="flex:1;min-height:0;overflow:auto;padding:8px;display:flex;flex-direction:column;gap:6px">
-          <!-- Rendered by JS renderTraderTab('bull') -->
+      <div class="pnl" id="p2" style="padding:0;flex-direction:column">
+        <div id="trader-bull-root" style="flex:1;min-height:0;overflow:auto;padding:8px;display:flex;flex-direction:column;gap:6px"></div>
+        <div class="tlog-wrap">
+          <div class="tlog-hdr">
+            <span>● Live Activity — BullishExecutor</span>
+            <button onclick="_clearTLog('bull')">clear</button>
+          </div>
+          <div id="tc-bull-livelog" class="tlog-body"></div>
         </div>
       </div>
 
       <!-- ════════════════════════════ TAB 3 · BEARISH TRADER ═════════════════════ -->
-      <div class="pnl" id="p3">
-        <div id="trader-bear-root" style="flex:1;min-height:0;overflow:auto;padding:8px;display:flex;flex-direction:column;gap:6px">
-          <!-- Rendered by JS renderTraderTab('bear') -->
+      <div class="pnl" id="p3" style="padding:0;flex-direction:column">
+        <div id="trader-bear-root" style="flex:1;min-height:0;overflow:auto;padding:8px;display:flex;flex-direction:column;gap:6px"></div>
+        <div class="tlog-wrap">
+          <div class="tlog-hdr">
+            <span>● Live Activity — BearishExecutor</span>
+            <button onclick="_clearTLog('bear')">clear</button>
+          </div>
+          <div id="tc-bear-livelog" class="tlog-body"></div>
         </div>
       </div>
 
       <!-- ════════════════════════════ TAB 4 · VOLATILE TRADER ════════════════════ -->
-      <div class="pnl" id="p4">
-        <div id="trader-vol-root" style="flex:1;min-height:0;overflow:auto;padding:8px;display:flex;flex-direction:column;gap:6px">
-          <!-- Rendered by JS renderVolatilePlaceholder() -->
+      <div class="pnl" id="p4" style="padding:0;flex-direction:column">
+        <div id="trader-vol-root" style="flex:1;min-height:0;overflow:auto;padding:8px;display:flex;flex-direction:column;gap:6px"></div>
+        <div class="tlog-wrap">
+          <div class="tlog-hdr">
+            <span>● Live Activity — VolatileTrader</span>
+            <button onclick="_clearTLog('vol')">clear</button>
+          </div>
+          <div id="tc-vol-livelog" class="tlog-body"></div>
         </div>
       </div>
 
@@ -1354,10 +1538,15 @@
         <div id="ob-root" style="height:100%;display:flex;flex-direction:column;overflow:hidden"></div>
       </div>
 
-      <div class="pnl" id="p6"><div id="manual-root" style="padding:12px;max-width:900px;margin:0 auto;line-height:1.6"></div></div>
+      <!-- ══════════════════════════ TAB 6 · WORKFLOW DIAGRAM ══════════════════════ -->
+      <div class="pnl" id="p6" style="padding:0;flex-direction:column;overflow:hidden">
+        <div id="workflow-root" style="height:100%;overflow:auto"></div>
+      </div>
 
-      <!-- ══════════════════════════ TAB 7 · VIRTUAL ACCOUNTS ══════════════════════ -->
-      <div class="pnl" id="p7" style="padding:0">
+      <div class="pnl" id="p7"><div id="manual-root" style="padding:12px;max-width:900px;margin:0 auto;line-height:1.6"></div></div>
+
+      <!-- ══════════════════════════ TAB 8 · VIRTUAL ACCOUNTS ══════════════════════ -->
+      <div class="pnl" id="p8" style="padding:0">
         <div id="accounts-root" style="height:100%;overflow:auto;padding:8px;display:flex;flex-direction:column;gap:6px"></div>
       </div>
     </div><!-- /body -->
@@ -1431,6 +1620,62 @@
       eventCalendar: [],         // full 2026 calendar from /api/events
     };
     let CFG = {}, cfgEdits = {}, chgLogs = [], activeTab = 0, activeExTab = 0;
+
+    // ── 3-Section navigation ──────────────────────────────────────────────────
+    const NAV = [
+      { label:'📊 Data', col:'#60a5fa', subs:[
+        { label:'₿ Futures & Options', tab:0 },
+        { label:'📈 BTC Technicals',   tab:1 },
+        { label:'📦 Order Blocks',     tab:5 },
+      ]},
+      { label:'⚡ Traders Room', col:'#a78bfa', subs:[
+        { label:'🔗 Workflow',    tab:6 },
+        { label:'🟢 Bullish',    tab:2 },
+        { label:'🔴 Bearish',    tab:3 },
+        { label:'⚡ Volatile',   tab:4 },
+      ]},
+      { label:'📋 Reports', col:'#f59e0b', subs:[
+        { label:'💰 Accounts',   tab:8 },
+        { label:'📖 Manual',     tab:7 },
+      ]},
+    ];
+    let _activeSec = 0, _activeSub = 0;
+
+    function showSection(s, sub) {
+      if (s == null) s = _activeSec;
+      sub = sub ?? 0;
+      _activeSec = s; _activeSub = sub;
+      const sec = NAV[s];
+      // Section buttons
+      document.querySelectorAll('.sec-btn').forEach((b, i) => {
+        b.classList.toggle('on', i === s);
+        b.style.color           = i === s ? NAV[s].col : '';
+        b.style.borderBottomColor = i === s ? NAV[s].col : 'transparent';
+      });
+      // Sub-tabs
+      const stabEl = el('stab-row');
+      if (stabEl) stabEl.innerHTML = sec.subs.map((st, i) =>
+        `<button class="stab-btn ${i === sub ? 'on' : ''}" onclick="showSection(${s},${i})"
+           style="${i === sub ? `color:${sec.col};border-bottom-color:${sec.col}` : ''}">${st.label}</button>`
+      ).join('');
+      showTab(sec.subs[sub].tab);
+    }
+
+    // ── Per-trader live logs ──────────────────────────────────────────────────
+    const _tLogs = { bull:[], bear:[], vol:[] };
+    const _MAX_TLOGS = 200;
+
+    function _renderTLog(key) {
+      const cont = el('tc-' + key + '-livelog');
+      if (!cont) return;
+      cont.innerHTML = _tLogs[key].slice(0, 80).map(l => {
+        const lc = l.level==='ERROR'?'#ef4444':l.level==='WARNING'?'#f59e0b':'#374151';
+        const ts = (l.ts_ist||'').slice(11,19);
+        return `<div class="tlog-entry"><span class="tlog-ts">${ts}</span><span class="tlog-msg" style="color:${lc}">${l.message||''}</span></div>`;
+      }).join('');
+      // auto-scroll to top (newest first)
+    }
+    function _clearTLog(key) { _tLogs[key]=[]; _renderTLog(key); }
     let anCandles = [];         // live candles from feed
     let _lastMonitorTs = 0;     // epoch ms of last EXECUTOR_MONITOR event
     let _exRenderTimer = null;  // debounce handle for renderEx from OPTIONS_CHAIN
@@ -1450,6 +1695,9 @@
     let _wsRetryDelay = 2000;          // exponential backoff for reconnects
     let _lastMsgTs = 0;                // epoch ms of last received message
     let _stallWatchdog = null;         // interval checking for stale data
+
+    // Bootstrap navigation on page load
+    setTimeout(() => showSection(0, 0), 0);
 
     function connectWS() {
       if (wsPingInterval) clearInterval(wsPingInterval);
@@ -1735,7 +1983,17 @@
           if (activeTab === 2 && activeExTab === 2) renderMgr(); break;
         case 'LOG_EVENT':
           S.logs.unshift(d); if (S.logs.length > 500) S.logs.pop();
-          renderLogs(); break;
+          renderLogs();
+          // Route to per-trader live log
+          { const src = d.source || '';
+            const tk = src.includes('Bullish') ? 'bull' : src.includes('Bearish') ? 'bear' : src.includes('Volatile') ? 'vol' : null;
+            if (tk) {
+              _tLogs[tk].unshift(d);
+              if (_tLogs[tk].length > _MAX_TLOGS) _tLogs[tk].pop();
+              _renderTLog(tk);
+            }
+          }
+          break;
         case 'FEED_STATUS':
           S.feeds[d.feed] = d; renderFeeds(); break;
         case 'SYSTEM_STATUS':
@@ -1771,7 +2029,7 @@
     }
     function showTab(i) {
       activeTab = i;
-      document.querySelectorAll('.tab').forEach((t, j) => t.classList.toggle('on', j === i));
+      // .tab elements no longer used — navigation handled by showSection()
       document.querySelectorAll('.pnl').forEach((p, j) => p.classList.toggle('on', j === i));
       if (i === 1) initBtcTechnicals();
       if (i === 2) renderTraderTab('bull');
@@ -1786,8 +2044,10 @@
         }).catch(() => {});
       }
       if (i === 5) initOrderBlocks();
-      if (i === 6) _renderUserManual();
-      if (i === 7) _loadAllAccounts();
+      if (i === 6) initWorkflowDiagram();
+      else if (_wfInterval && i !== 6) { clearInterval(_wfInterval); _wfInterval = null; }
+      if (i === 7) _renderUserManual();
+      if (i === 8) _loadAllAccounts();
     }
 
     // ════════════════════════════════════════════════════════════ OVERVIEW
@@ -3356,15 +3616,25 @@ async function _updateSessionBanner() {
            value="${fv(k)}" step="${step}" min="${min}" max="${max}"
            oninput="_tsCfgChange(this)" title="${note}"></div>`;
       const time = (lbl,hk,mk,dh,dm) => {
-        const h=fv(hk)||dh, m=fv(mk)||dm;
-        return `<div><div style="font-size:8px;color:#64748b;margin-bottom:2px">${lbl}</div>
-          <div style="display:flex;gap:3px;align-items:center">
-            <input type="number" class="inp inp-sm" style="width:42px" data-tk="${key}" data-k="${pfx+hk}"
-              value="${h}" min="0" max="23" oninput="_tsCfgChange(this)">
-            <span style="color:#4b5563">:</span>
-            <input type="number" class="inp inp-sm" style="width:42px" data-tk="${key}" data-k="${pfx+mk}"
-              value="${m}" min="0" max="59" step="5" oninput="_tsCfgChange(this)">
-          </div></div>`;
+        const h=parseInt(fv(hk)??dh), m=parseInt(fv(mk)??dm);
+        const fullHKey=pfx+hk, fullMKey=pfx+mk;
+        const btnId=`tp-${fullHKey}-${fullMKey}`;
+        return `<div>
+          <div style="font-size:8px;color:#64748b;margin-bottom:4px">${lbl}</div>
+          <button class="tpick-btn" id="${btnId}"
+            onclick="_cpOpen(
+              parseInt(CFG['${fullHKey}']??${dh}),
+              parseInt(CFG['${fullMKey}']??${dm}),
+              '${fullHKey}','${fullMKey}',
+              function(h,m){_tpApplyTraderCard(h,m,'${fullHKey}','${fullMKey}');},
+              '${lbl}', document.getElementById('${btnId}')
+            )">
+            <span style="font-size:10px;color:#4b5563">🕐</span>
+            <span id="${btnId}-txt">${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}</span>
+          </button>
+          <input type="hidden" class="inp inp-sm" data-tk="${key}" data-k="${fullHKey}" value="${h}" oninput="_tsCfgChange(this)">
+          <input type="hidden" class="inp inp-sm" data-tk="${key}" data-k="${fullMKey}" value="${m}" oninput="_tsCfgChange(this)">
+        </div>`;
       };
       const curOBTF = fv('ob_tf') || CFG['ob_tf'] || '15m';
       const tfBtns = ['5m','15m','1h','4h'].map(tf => {
@@ -3663,12 +3933,20 @@ async function _updateSessionBanner() {
       const ar   = (posD||{}).analysis_report || {};
       const arLabel = ar.ob_zone ? `OB ${ar.ob_type||'zone'} ${ar.tf||''}`.trim() : '';
 
+      const _obWaitLR      = !!(posD||{}).ob_wait_active;
+      const _obWaitSinceLR = (posD||{}).ob_wait_since || '';
+      const _obFormedLR    = !!ar.ob_formed_during_window;
       const lineRow = el(`tc-${key}-line-row`);
       if (lineRow) lineRow.innerHTML = isAnalyzing
         ? `<span style="color:#60a5fa;font-size:10px;animation:blink-pend 1s ease-in-out infinite">⟳ Running S/R analysis with current parameters — please wait...</span>`
-        : target
+        : _obWaitLR
+          ? `<span style="font-size:10px;padding:1px 8px;background:#1a1208;border:1px solid #92400e;border-radius:3px;color:#f59e0b;font-weight:bold;animation:blink-pend 2s ease-in-out infinite">⏳ OB WATCH</span>
+             <span class="gr" style="font-size:9px">No ${ar.ob_type||(key==='bull'?'demand':'supply')} zone at open${_obWaitSinceLR?' · since '+_obWaitSinceLR.substring(11,16):''} — watching ${(ar.tf||CFG[pfx+'ob_tf']||CFG['ob_tf']||'15m').toUpperCase()} candles</span>
+             <span class="gr">Squareoff: <span class="r">${ft(forceH,forceM)}</span> IST</span>`
+          : target
           ? `<span style="font-size:10px;padding:1px 8px;background:#0f172a;border:1px solid ${tc.col};border-radius:3px;color:${tc.col};font-weight:bold">🔒 Target: $${fmt(target,0)}</span>
              ${arLabel ? `<span style="font-size:8px;color:#374151;font-family:monospace;background:#0a0a14;padding:1px 4px;border-radius:2px;margin-left:2px">${arLabel}</span>` : ''}
+             ${_obFormedLR ? `<span style="font-size:8px;color:#f59e0b;border:1px solid #92400e;padding:0 3px;border-radius:2px;margin-left:2px">FORMED DURING WINDOW</span>` : ''}
              <span class="gr">${dist!=null?'dist '+fmt(dist,0)+' pts':'—'}</span>
              <span class="gr">Squareoff: <span class="r">${ft(forceH,forceM)}</span> IST</span>`
           : `<span class="gr">Window: ${ft(startH,startM)}–${ft(endH,endM)} IST · Squareoff: <span class="r">${ft(forceH,forceM)}</span></span>`;
@@ -3748,44 +4026,73 @@ async function _updateSessionBanner() {
                :(() => { const n=new Date(),nm=n.getHours()*60+n.getMinutes(),sm=startH*60+startM,d=(sm-nm+1440)%1440; return `Reopens ${ft(startH,startM)} IST`+(d<=120?` — in ${d} min`:''); })()) +
 
         (() => {
-          const ar    = pos.analysis_report || {};
-          const obZ   = ar.ob_zone || {};
-          const ztype = ar.ob_type || (key==='bull'?'demand':'supply');
-          // Distinguish: analysis ran but no zone vs analysis not yet started
-          const noZone = pos.eligible === false && !target && !!ar.analysis_time;
-          const analysisDone = !!target || noZone;
-          const analysisActive = !analysisDone && inWin && !target;
+          const ar         = pos.analysis_report || {};
+          const obZ        = ar.ob_zone || {};
+          const ztype      = ar.ob_type || (key==='bull'?'demand':'supply');
+          const obWait     = !!pos.ob_wait_active;
+          const obWaitSince= pos.ob_wait_since || '';
+          const obWaitReason=pos.ob_wait_reason|| '';
+          const obFormedDuringWindow = !!(ar.ob_formed_during_window);
           const analysisTFStr = ar.tf || CFG[pfx+'ob_tf'] || CFG['ob_tf'] || '15m';
+          // Distinguish states clearly
+          const noZoneFinal = pos.eligible === false && !target && !!ar.analysis_time && !obWait;
+          const analysisDone  = !!target || noZoneFinal;
+          const analysisActive= !analysisDone && !obWait && inWin && !target;
+
+          const _gradeCol = g => g==='A+'?'#a78bfa':g==='A'?'#60a5fa':'#4ade80';
+
           const s2Detail = (() => {
-            if (noZone) return `No ${ztype} OB zone found on ${analysisTFStr.toUpperCase()} TF — will retry next session`;
+            if (noZoneFinal) return `No ${ztype} OB found on ${analysisTFStr.toUpperCase()} at window open — ineligible today`;
+            if (obWait) {
+              const sinceStr = obWaitSince ? `<span style="color:#6b7280">since ${obWaitSince}</span>` : '';
+              const reasonStr = obWaitReason ? `<span style="color:#6b7280;font-size:8px"> (${obWaitReason})</span>` : '';
+              return `<span style="color:#f59e0b;font-weight:bold">⏳ OB WATCH</span> — No ${ztype} zone at window open ${sinceStr}${reasonStr}<br>`
+                + `<span style="color:#9ca3af">Scanning every ${analysisTFStr.toUpperCase()} candle close — will lock zone the instant one forms</span>`;
+            }
             if (!target) return `Fetching Order Block zones on ${analysisTFStr.toUpperCase()} → looking for nearest ${ztype} zone...`;
-            const gradeStr = obZ.grade ? ` &nbsp;<span style="color:${obZ.grade==='A+'?'#a78bfa':obZ.grade==='A'?'#60a5fa':'#4ade80'};font-weight:bold">${obZ.grade}</span>` : '';
+            const gradeStr = obZ.grade ? ` &nbsp;<span style="color:${_gradeCol(obZ.grade)};font-weight:bold">${obZ.grade}</span>` : '';
+            const lockedAt = ar.analysis_time ? `<span style="color:#6b7280;font-size:8px"> · locked ${ar.analysis_time}</span>` : '';
+            const formedTag = obFormedDuringWindow
+              ? ` &nbsp;<span style="color:#f59e0b;font-size:8px;border:1px solid #92400e;padding:0 3px;border-radius:2px">FORMED DURING WINDOW</span>` : '';
             return `${ztype.toUpperCase()} OB mid <b style="color:${tc.col}">$${fmt(target,0)}</b> locked`
               + ` &nbsp;<span style="color:#4b5563">$${fmt(obZ.bottom||0,0)}–$${fmt(obZ.top||0,0)}</span>`
-              + gradeStr
-              + ` &nbsp;<button onclick="_showAnalysisDetails('${key}')" style="font-size:9px;padding:1px 6px;background:#0f172a;border:1px solid #374151;border-radius:3px;color:#9ca3af;cursor:pointer">Zone Details ↗</button>`;
+              + gradeStr + formedTag + lockedAt
+              + ` &nbsp;<button onclick="_showAnalysisDetails('${key}')" style="font-size:9px;padding:1px 6px;background:#0f172a;border:1px solid #374151;border-radius:3px;color:#9ca3af;cursor:pointer">Zone Details ↗</button>`
+              + ` &nbsp;<button onclick="_showOBHistory('${key}')" style="font-size:9px;padding:1px 6px;background:#0f172a;border:1px solid #374151;border-radius:3px;color:#9ca3af;cursor:pointer">OB Log ↗</button>`
+              + ` &nbsp;<button onclick="_showSessionTimeline('${key}')" style="font-size:9px;padding:1px 6px;background:#0f172a;border:1px solid #374151;border-radius:3px;color:#9ca3af;cursor:pointer">Session Log ↗</button>`;
           })();
-          const s2Label = noZone ? `No ${ztype} zone — analysis complete`
+
+          const s2Label = noZoneFinal ? `No ${ztype} zone — ineligible today`
+                        : obWait      ? `⏳ Watching for ${ztype} OB on ${analysisTFStr.toUpperCase()}`
                         : `Market analysis ${target ? 'complete' : 'running'}`;
 
-          // Step 3: eligible check — distinguish no-zone vs price-too-far
-          const maxD = CFG[pfx+'max_distance_from_line']||100;
-          const dist = target ? Math.abs(price-(target||0)) : null;
-          const s3Fail = pos.eligible === false;
-          const s3Active = !!target && pos.eligible !== true && pos.eligible !== false;
-          const s3Label = pos.eligible===true ? `Eligible ✓`
-                        : noZone            ? `No ${ztype} zone — ineligible today`
-                        : pos.eligible===false ? `Ineligible — price too far`
-                        : `Eligibility check`;
-          const s3Detail = (() => {
-            if (pos.eligible===true) return `$${fmt(price,0)} within ${dist!=null?fmt(dist,0):'?'}pts of ${ztype} OB mid $${fmt(target,0)}`;
-            if (noZone) return `No ${ztype} zone detected — ${key==='bull'?'demand':'supply'} analysis returned 0 zones on ${analysisTFStr.toUpperCase()}`;
-            if (pos.eligible===false) return `Price $${fmt(price,0)} is ${dist!=null?fmt(dist,0):'?'}pts from OB mid — need ±${maxD}pts`;
+          const s2Done = !obWait && !noZoneFinal && !!target;
+          const s2Fail = noZoneFinal;
+          const s2Active = analysisActive || obWait;
+
+          // Step 3: eligible check — no "ineligible" state; only watch or eligible
+          const maxD       = CFG[pfx+'max_distance_from_line']||100;
+          const dist       = target ? Math.abs(price-(target||0)) : null;
+          const priceWatch = !!target && !obWait && pos.eligible !== true;
+          const inRange    = dist != null && dist <= maxD;
+          const s3Fail     = false;   // never show red X — trader always keeps watching
+          const s3Active   = (priceWatch && !inRange) || obWait;
+          const s3Done     = pos.eligible === true;
+          const s3Label    = s3Done        ? `Eligible ✓ — price within zone`
+                           : noZoneFinal   ? `No ${ztype} zone — session ended`
+                           : obWait        ? `Awaiting OB formation`
+                           : priceWatch    ? `Watching — price ${dist!=null?fmt(dist,0):'?'}pts from OB zone`
+                           : `Eligibility check`;
+          const s3Detail   = (() => {
+            if (s3Done)       return `$${fmt(price,0)} within ${dist!=null?fmt(dist,0):'?'}pts of ${ztype} OB mid $${fmt(target,0)} — ±${maxD}pts tolerance`;
+            if (noZoneFinal)  return `No ${ztype} zone found this session. Zones will be scanned again next session.`;
+            if (obWait)       return `Watching every ${analysisTFStr.toUpperCase()} candle close for a qualifying ${ztype} OB zone`;
+            if (priceWatch)   return `${ztype.toUpperCase()} OB locked at $${fmt(target,0)} · price $${fmt(price,0)} · dist=${dist!=null?fmt(dist,0):'?'}pts · need ≤${maxD}pts · watching every tick &nbsp;<button onclick="_showSessionTimeline('${key}')" style="font-size:8px;padding:1px 5px;background:#0f172a;border:1px solid #374151;border-radius:2px;color:#9ca3af;cursor:pointer">Session Log ↗</button>`;
             return `Need price within ±${maxD}pts of ${ztype} OB mid $${fmt(target||0,0)}`;
           })();
 
-          return _step(!noZone && !!target, analysisActive, noZone, s2Label, s2Detail) +
-                 _step(pos.eligible===true, s3Active, s3Fail, s3Label, s3Detail);
+          return _step(s2Done, s2Active, s2Fail, s2Label, s2Detail) +
+                 _step(s3Done, s3Active, s3Fail, s3Label, s3Detail);
         })() +
 
         _step(inPos, isVerif, false,
@@ -4108,6 +4415,983 @@ async function _updateSessionBanner() {
         </div>`;
       modal.onclick = e => { if (e.target === modal) modal.remove(); };
       document.body.appendChild(modal);
+    }
+
+    // ── OB History modal ───────────────────────────────────────────────
+    function _showOBHistory(key) {
+      const tc    = TRADER_CFG[key];
+      const modal = document.createElement('div');
+      modal.style.cssText = 'position:fixed;inset:0;background:rgba(2,6,23,.92);backdrop-filter:blur(8px);z-index:20000;display:flex;align-items:center;justify-content:center';
+      modal.innerHTML = `
+        <div style="background:#0f172a;border:1px solid #334155;border-radius:10px;padding:24px;width:700px;max-width:96vw;max-height:90vh;display:flex;flex-direction:column;gap:12px">
+          <div style="display:flex;justify-content:space-between;align-items:flex-start">
+            <div>
+              <div style="font-size:15px;font-weight:bold;color:${tc.col}">${tc.label} — Order Block History</div>
+              <div style="font-size:10px;color:#64748b;margin-top:3px">Daily OB zone log — cross-verify analysis accuracy. Refreshed on open.</div>
+            </div>
+            <span onclick="this.closest('[style*=fixed]').remove()" style="cursor:pointer;color:#94a3b8;font-size:24px;line-height:1;padding:0 6px">✕</span>
+          </div>
+          <div id="ob-hist-content-${key}" style="overflow-y:auto;flex:1">
+            <div style="color:#4b5563;font-size:10px;text-align:center;padding:20px">Loading…</div>
+          </div>
+        </div>`;
+      modal.onclick = e => { if (e.target === modal) modal.remove(); };
+      document.body.appendChild(modal);
+
+      const tName = (TRADER_CFG[key]||{}).exName || key;
+      fetch(`/api/ob-history?trader=${encodeURIComponent(tName)}&limit=60`)
+        .then(r => r.json())
+        .then(data => {
+          const rows = data.records || [];
+          const cont = document.getElementById('ob-hist-content-' + key);
+          if (!cont) return;
+          if (!rows.length) {
+            cont.innerHTML = '<div style="color:#4b5563;font-size:10px;text-align:center;padding:20px">No OB history recorded yet.<br>Records are saved from the next window open.</div>';
+            return;
+          }
+          const _stCol = s => s==='available_at_open'?'#4ade80':s==='formed_during_window'?'#f59e0b':s==='waiting'?'#60a5fa':'#ef4444';
+          const _stLbl = s => s==='available_at_open'?'✓ At Open':s==='formed_during_window'?'⏳ Formed During Window':s==='waiting'?'⌛ Still Waiting':'✗ Not Found';
+          const _ts = t => t ? t.substring(5,16).replace('T',' ') : '—';
+          const tableRows = rows.map((r, i) => `
+            <tr style="${i%2===0?'background:#030712':''}">
+              <td style="padding:4px 8px;color:#9ca3af;font-family:monospace;white-space:nowrap">${r.session_date||'—'}</td>
+              <td style="padding:4px 8px;color:#64748b;font-size:9px">${r.tf||'—'}</td>
+              <td style="padding:4px 8px">
+                <span style="color:${_stCol(r.status)};font-weight:bold;font-size:10px">${_stLbl(r.status)}</span>
+              </td>
+              <td style="padding:4px 8px;color:#f59e0b;font-family:monospace">
+                ${r.zone_mid ? `$${Math.round(r.zone_mid)}` : '—'}
+              </td>
+              <td style="padding:4px 8px;color:#6b7280;font-size:9px">
+                ${r.zone_bottom&&r.zone_top ? `$${Math.round(r.zone_bottom)}–$${Math.round(r.zone_top)}` : '—'}
+              </td>
+              <td style="padding:4px 8px;text-align:center">
+                ${r.zone_grade ? `<span style="color:${{'A+':'#a78bfa','A':'#60a5fa','B':'#4ade80'}[r.zone_grade]||'#6b7280'};font-weight:bold">${r.zone_grade}</span>` : '—'}
+              </td>
+              <td style="padding:4px 8px;color:#6b7280;font-size:9px;white-space:nowrap">
+                ${r.wait_started_ts ? _ts(r.wait_started_ts) : '—'}
+              </td>
+              <td style="padding:4px 8px;color:#6b7280;font-size:9px;white-space:nowrap">
+                ${r.locked_at_ts ? _ts(r.locked_at_ts) : '—'}
+              </td>
+              <td style="padding:4px 8px;color:#374151;font-size:9px;max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${r.notes||''}">
+                ${r.notes||'—'}
+              </td>
+            </tr>`).join('');
+          cont.innerHTML = `
+            <table style="width:100%;font-size:11px;border-collapse:collapse">
+              <thead style="position:sticky;top:0;background:#0f172a;z-index:1">
+                <tr>
+                  <th style="text-align:left;color:#64748b;padding:4px 8px">Date</th>
+                  <th style="text-align:left;color:#64748b;padding:4px 8px">TF</th>
+                  <th style="text-align:left;color:#64748b;padding:4px 8px">Status</th>
+                  <th style="text-align:left;color:#f59e0b;padding:4px 8px">Mid</th>
+                  <th style="text-align:left;color:#64748b;padding:4px 8px">Zone</th>
+                  <th style="text-align:center;color:#64748b;padding:4px 8px">Grade</th>
+                  <th style="text-align:left;color:#64748b;padding:4px 8px">Wait Started</th>
+                  <th style="text-align:left;color:#64748b;padding:4px 8px">Locked At</th>
+                  <th style="text-align:left;color:#64748b;padding:4px 8px">Notes</th>
+                </tr>
+              </thead>
+              <tbody>${tableRows}</tbody>
+            </table>`;
+        })
+        .catch(e => {
+          const cont = document.getElementById('ob-hist-content-' + key);
+          if (cont) cont.innerHTML = `<div style="color:#ef4444;font-size:10px;text-align:center;padding:20px">Failed to load: ${e}</div>`;
+        });
+    }
+
+    // ── Session Timeline modal ─────────────────────────────────────────
+    function _showSessionTimeline(key, dateOverride) {
+      const tc    = TRADER_CFG[key];
+      const tName = (tc||{}).exName || key;
+      const modal = document.createElement('div');
+      modal.style.cssText = 'position:fixed;inset:0;background:rgba(2,6,23,.92);backdrop-filter:blur(8px);z-index:20000;display:flex;align-items:center;justify-content:center';
+      modal.innerHTML = `
+        <div style="background:#0f172a;border:1px solid #334155;border-radius:10px;padding:20px;width:760px;max-width:97vw;max-height:92vh;display:flex;flex-direction:column;gap:10px">
+          <div style="display:flex;justify-content:space-between;align-items:flex-start;flex-shrink:0">
+            <div>
+              <div style="font-size:15px;font-weight:bold;color:${tc.col}">${tc.label} — Session Timeline</div>
+              <div style="font-size:10px;color:#64748b;margin-top:2px">
+                Every window open to close — key events, 5-min snapshots, exact timestamps
+              </div>
+            </div>
+            <span onclick="this.closest('[style*=fixed]').remove()" style="cursor:pointer;color:#94a3b8;font-size:24px;line-height:1;padding:0 6px">✕</span>
+          </div>
+          <div id="stl-date-bar-${key}" style="display:flex;gap:4px;flex-wrap:wrap;flex-shrink:0;min-height:22px">
+            <span style="color:#4b5563;font-size:9px;padding:3px 0">Loading sessions…</span>
+          </div>
+          <div id="stl-content-${key}" style="overflow-y:auto;flex:1;min-height:200px">
+            <div style="color:#4b5563;font-size:10px;text-align:center;padding:20px">Loading…</div>
+          </div>
+        </div>`;
+      modal.onclick = e => { if (e.target === modal) modal.remove(); };
+      document.body.appendChild(modal);
+
+      const _loadDate = (date) => {
+        const cont = document.getElementById('stl-content-' + key);
+        if (cont) cont.innerHTML = '<div style="color:#4b5563;font-size:10px;text-align:center;padding:20px">Loading…</div>';
+        fetch('/api/session-log?trader=' + encodeURIComponent(tName) + '&date=' + encodeURIComponent(date) + '&limit=500')
+          .then(r => r.json())
+          .then(data => {
+            const evts = data.events || [];
+            if (!cont) return;
+            if (!evts.length) {
+              cont.innerHTML = '<div style="color:#4b5563;font-size:10px;text-align:center;padding:20px">No events recorded for this session.<br>Events are saved from the next window open.</div>';
+              return;
+            }
+
+            const _ETCol = {
+              window_open:              '#60a5fa',
+              ob_wait_start:            '#f59e0b',
+              ob_locked_during_window:  '#4ade80',
+              price_watch:              '#c084fc',
+              trade_entered:            '#22d3ee',
+              squareoff:                '#f87171',
+              snapshot:                 '#374151',
+            };
+            const _ETIcon = {
+              window_open:              '🔓',
+              ob_wait_start:            '⏳',
+              ob_locked_during_window:  '🔒',
+              price_watch:              '👁',
+              trade_entered:            '⚡',
+              squareoff:                '🔴',
+              snapshot:                 '📊',
+            };
+
+            let html = '<div style="padding:4px 2px;font-size:9px">';
+            evts.forEach((ev, i) => {
+              const col  = _ETCol[ev.event_type]  || '#6b7280';
+              const icon = _ETIcon[ev.event_type] || '·';
+              const ts   = (ev.event_ts_ist || '').replace(/ IST$/, '').slice(5);  // MM-DD HH:MM:SS
+              const isSnap = ev.event_type === 'snapshot';
+              html += `<div style="display:flex;gap:8px;padding:${isSnap?2:4}px 6px;border-bottom:1px solid ${isSnap?'#0a0a14':'#0f172a'};background:${i%2===0?'#030712':'transparent'};${isSnap?'opacity:0.7':''}">
+                <div style="flex-shrink:0;width:90px;color:#4b5563;font-family:monospace">${ts}</div>
+                <div style="flex-shrink:0;width:16px;text-align:center">${icon}</div>
+                <div style="flex-shrink:0;width:180px;color:${col};font-weight:${isSnap?'normal':'bold'}">${ev.event_type.replace(/_/g,' ')}</div>
+                <div style="flex:1;color:${isSnap?'#4b5563':'#9ca3af'};overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${ev.message||''}">${ev.message||'—'}</div>
+                ${ev.price ? `<div style="flex-shrink:0;color:#f59e0b;font-family:monospace;text-align:right">$${Math.round(ev.price)}</div>` : ''}
+              </div>`;
+            });
+            html += '</div>';
+            cont.innerHTML = html;
+          })
+          .catch(e => {
+            if (cont) cont.innerHTML = `<div style="color:#ef4444;font-size:10px;text-align:center;padding:20px">Error: ${e}</div>`;
+          });
+      };
+
+      // Load session date list, then load most recent (or dateOverride)
+      fetch('/api/session-log?trader=' + encodeURIComponent(tName) + '&limit=1')
+        .then(r => r.json())
+        .then(data => {
+          const dates = data.session_dates || [];
+          const bar   = document.getElementById('stl-date-bar-' + key);
+          if (bar) {
+            if (!dates.length) {
+              bar.innerHTML = '<span style="color:#4b5563;font-size:9px">No sessions recorded yet</span>';
+            } else {
+              bar.innerHTML = dates.map(d =>
+                `<button onclick="_stlLoadDate('${key}','${d}',this)" style="font-size:9px;padding:2px 7px;border-radius:3px;cursor:pointer;border:1px solid #374151;background:transparent;color:#6b7280">${d}</button>`
+              ).join('');
+            }
+          }
+          const target = dateOverride || dates[0];
+          if (target) {
+            // Highlight selected
+            const btns = (bar||{}).querySelectorAll && bar.querySelectorAll('button');
+            if (btns) btns.forEach(b => {
+              if (b.textContent.trim() === target) {
+                b.style.background='#1e3a5f'; b.style.color='#93c5fd'; b.style.borderColor='#1e40af';
+              }
+            });
+            _loadDate(target);
+          }
+        })
+        .catch(() => {});
+
+      // Expose helper for date button clicks
+      window._stlLoadDate = (k, date, btn) => {
+        const bar = document.getElementById('stl-date-bar-' + k);
+        if (bar) bar.querySelectorAll('button').forEach(b => {
+          b.style.background='transparent'; b.style.color='#6b7280'; b.style.borderColor='#374151';
+        });
+        if (btn) { btn.style.background='#1e3a5f'; btn.style.color='#93c5fd'; btn.style.borderColor='#1e40af'; }
+        fetch('/api/session-log?trader=' + encodeURIComponent(tName) + '&date=' + encodeURIComponent(date) + '&limit=500')
+          .then(r => r.json())
+          .then(data => {
+            const cont = document.getElementById('stl-content-' + k);
+            if (!cont) return;
+            _showSessionTimeline._render(k, data.events || []);
+          }).catch(() => {});
+      };
+    }
+
+    // ══════════════════════════════════ WORKFLOW DIAGRAM ════════════════════
+    let _wfInterval = null;
+    let _wfActiveKey = 'bull';        // which trader is shown in detail
+    const _wfSessionEvts = {};        // cached session events per trader key
+
+    function initWorkflowDiagram() {
+      const root = el('workflow-root');
+      if (!root) return;
+      root.innerHTML = `
+        <div style="background:#060d1a;border-bottom:1px solid #1e2d45;padding:10px 16px;display:flex;align-items:center;justify-content:space-between;flex-shrink:0">
+          <div style="display:flex;align-items:center;gap:8px">
+            <div style="width:8px;height:8px;border-radius:50%;background:#a78bfa;box-shadow:0 0 8px #a78bfa88"></div>
+            <span style="font-weight:700;color:#c4b5fd;font-size:13px;letter-spacing:.03em">Neural Workflow — Live State Machine</span>
+          </div>
+          <span style="font-size:8px;color:#334155">⟳ 2s update · live WS · click trader to inspect</span>
+        </div>
+        <div id="wf-trader-tabs" style="display:flex;gap:0;padding:4px 14px;border-bottom:1px solid #1e2d45;flex-shrink:0;background:#040b14"></div>
+        <div id="wf-canvas" style="padding:14px;overflow:auto;flex:1;background:#030a15"></div>
+        <div id="wf-session-strip" style="padding:7px 16px;border-top:1px solid #1e2d45;flex-shrink:0;overflow-x:auto;white-space:nowrap;min-height:32px;display:flex;align-items:center;gap:0;background:#040b14"></div>`;
+      _wfRender();
+      _wfRenderTraderTabs();
+      _wfFetchSession(_wfActiveKey);
+      if (_wfInterval) clearInterval(_wfInterval);
+      _wfInterval = setInterval(_wfRender, 2000);
+    }
+
+    function _wfRenderTraderTabs() {
+      const el2 = el('wf-trader-tabs'); if (!el2) return;
+      const tabs = [
+        { key:'bull', label:'🟢 Bullish', col:'#4ade80' },
+        { key:'bear', label:'🔴 Bearish', col:'#f87171' },
+        { key:'vol',  label:'⚡ Volatile', col:'#f59e0b' },
+      ];
+      el2.innerHTML = tabs.map(t => {
+        const on = t.key === _wfActiveKey;
+        return `<button onclick="_wfSetTrader('${t.key}')"
+          style="padding:5px 18px;background:${on?t.col+'18':'transparent'};border:none;
+                 border-bottom:2px solid ${on?t.col:'transparent'};color:${on?t.col:'#4b5563'};
+                 font-size:10px;cursor:pointer;font-weight:${on?'bold':'normal'}">${t.label}</button>`;
+      }).join('');
+    }
+    function _wfSetTrader(key) {
+      _wfActiveKey = key;
+      _wfRenderTraderTabs();
+      _wfRender();
+      _wfFetchSession(key);
+    }
+
+    async function _wfFetchSession(key) {
+      const tName = (TRADER_CFG[key]||{}).exName || key;
+      try {
+        const r = await fetch(`/api/session-log?trader=${encodeURIComponent(tName)}&limit=80`);
+        const d = await r.json();
+        _wfSessionEvts[key] = d.events || [];
+        _wfRenderSessionStrip(key);
+      } catch(e) { _wfSessionEvts[key] = []; }
+    }
+
+    function _wfRenderSessionStrip(key) {
+      const strip = el('wf-session-strip'); if (!strip) return;
+      const evts  = (_wfSessionEvts[key] || []).filter(e => e.event_type !== 'snapshot').slice(0, 20);
+      const col   = key==='bull'?'#4ade80':key==='bear'?'#f87171':'#f59e0b';
+      const _IC   = { window_open:'🔓', ob_wait_start:'⏳', ob_locked_during_window:'🔒',
+                      price_watch:'👁', trade_entered:'⚡', squareoff:'🔴' };
+      const _ECOL = { trade_entered:'#22d3ee', squareoff:'#f87171' };
+      if (!evts.length) {
+        strip.innerHTML = `<span style="font-size:8px;color:#1e2d45;font-style:italic">No session events yet — logged when trading window opens</span>`;
+        return;
+      }
+      strip.innerHTML = `
+        <span style="font-size:7px;color:#1e2d45;text-transform:uppercase;letter-spacing:.08em;margin-right:10px;flex-shrink:0">Session Timeline:</span>` +
+        evts.map((e,i) => {
+          const ts   = (e.event_ts_ist||'').slice(11,16);  // time only HH:MM
+          const ic   = _IC[e.event_type] || '·';
+          const ecol = _ECOL[e.event_type] || (e.event_type.includes('ob') ? col : '#475569');
+          const isLast = i === evts.length - 1;
+          return `<span style="display:inline-flex;align-items:center;gap:4px;flex-shrink:0">
+            <span style="font-size:8px;color:#1e3a5f;font-family:monospace">${ts}</span>
+            <span style="font-size:11px">${ic}</span>
+            <span style="font-size:8px;font-weight:600;color:${ecol}">${e.event_type.replace(/_/g,' ').toUpperCase()}</span>
+            ${e.price?`<span style="font-size:8px;color:#334155;font-family:monospace">@$${Math.round(e.price).toLocaleString()}</span>`:''}
+            ${!isLast?`<span style="color:#1e2d45;margin:0 4px;font-size:10px">→</span>`:''}
+          </span>`;
+        }).join('');
+    }
+
+    function _wfRender() {
+      const root = el('wf-canvas');
+      if (!root) { clearInterval(_wfInterval); return; }
+
+      const price = S.futures?.mark_price || 0;
+      const key   = _wfActiveKey;
+      const pos   = key==='bull'?S.bull:key==='bear'?S.bear:S.vol || {};
+      const mon   = S.monitors?.[key] || {};
+      const col   = key==='bull'?'#4ade80':key==='bear'?'#f87171':'#f59e0b';
+
+      const sesEvts = _wfSessionEvts[key] || [];
+      const _evtTs = (type) => {
+        const e = sesEvts.find(ev => ev.event_type === type);
+        return e ? (e.event_ts_ist||'').slice(11,16) : null;
+      };
+
+      root.innerHTML =
+        _wfDataFeedsRow(price) +
+        '<div style="margin-top:10px">' +
+          _wfTraderColumn(key, pos, mon, col, _evtTs) +
+        '</div>' +
+        _wfLegend();
+
+      _wfRenderSessionStrip(key);
+    }
+
+    function _wfDataFeedsRow(price) {
+      const fok = (k) => (S.feeds[k]?.status === 'ok');
+      const chain = S.options_count || 0;
+      const feeds = [
+        { icon:'₿', label:'BTC Price',     key:'futures_feed',  detail:'$'+Math.round(price).toLocaleString() },
+        { icon:'📊', label:'Options Chain', key:'options_feed',  detail:chain+' strikes' },
+        { icon:'🕯', label:'Candle Stream', key:'futures_feed',  detail:'1m 5m 15m 1h 4h' },
+        { icon:'💧', label:'Order Book',    key:'futures_feed',  detail:'20 depth levels' },
+      ];
+      return `
+        <div style="background:#060d1a;border:1px solid #1e2d45;border-radius:8px;padding:10px 16px;margin-bottom:8px">
+          <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">
+            <div style="display:flex;align-items:center;gap:6px">
+              <div style="width:6px;height:6px;border-radius:50%;background:#6366f1;box-shadow:0 0 6px #6366f180"></div>
+              <span style="font-size:9px;color:#818cf8;font-weight:700;letter-spacing:.12em;text-transform:uppercase">Live Data Feeds</span>
+            </div>
+            <span style="font-size:8px;color:#334155;font-family:monospace">↻ real-time WebSocket</span>
+          </div>
+          <div style="display:flex;gap:8px">
+            ${feeds.map(f => `
+              <div style="flex:1;background:${fok(f.key)?'#040f1a':'#0a0f1e'};border:1px solid ${fok(f.key)?'#1e3a5f':'#1a2032'};border-radius:6px;padding:8px 12px;display:flex;align-items:center;gap:10px;transition:border-color .3s">
+                <span style="font-size:18px;filter:${fok(f.key)?'none':'grayscale(1) opacity(.3)'}">${f.icon}</span>
+                <div style="flex:1;min-width:0">
+                  <div style="font-size:9px;font-weight:700;color:${fok(f.key)?'#e2e8f0':'#334155'}">${f.label}</div>
+                  <div style="font-size:8px;color:#475569;font-family:monospace;margin-top:1px">${f.detail}</div>
+                </div>
+                <div style="display:flex;flex-direction:column;align-items:center;gap:2px">
+                  <div style="width:8px;height:8px;border-radius:50%;background:${fok(f.key)?'#4ade80':'#374151'};${fok(f.key)?'box-shadow:0 0 7px #4ade80':''}"></div>
+                  <span style="font-size:7px;font-weight:700;color:${fok(f.key)?'#4ade80':'#374151'}">${fok(f.key)?'OK':'OFF'}</span>
+                </div>
+              </div>`).join('')}
+          </div>
+        </div>`;
+    }
+
+    function _wfTraderColumn(key, pos, mon, col, _evtTs) {
+      _evtTs = _evtTs || (() => null);
+      const state  = pos.state || 'SLEEP';
+      const inWin  = !!pos.in_window;
+      const price  = S.futures?.mark_price || 0;
+
+      // ── VOLATILE TRADER — separate node map ───────────────────────────
+      if (key === 'vol') {
+        const ve   = S.volatileEvent || {};
+        const evName = ve.name || '';
+        const armed  = !!ve.armed;
+        const nodes = [
+          {
+            evtType:'window_open', icon: inWin?'🟢':'⚫',
+            label: inWin?'WINDOW OPEN':'WINDOW / SLEEP',
+            detail: inWin?'Monitoring for macro events (FOMC, CPI, NFP…)':'Inactive outside trading window',
+            active: inWin && state==='SLEEP', done: inWin, col:inWin?'#0a1a0a':'#111827', border:inWin?col:'#1f2937',
+          },
+          {
+            icon: armed?'📡':'⬜', label: armed?`EVENT ARMED — ${evName}`:'EVENT WATCH',
+            detail: armed?`Pre-event window open · waiting for event fire`:'Arms itself pre_event_minutes before each macro event',
+            active: armed, done: state==='VERIFY_HEDGE_LOOP'||state==='EXECUTE'||state==='MANAGING_POSITION',
+            col: armed?'#1a1200':'#111827', border: armed?col:'#1f2937', pulse: armed,
+          },
+          {
+            icon: state==='CHECK_ELIGIBILITY'?'⚡':'⬜', label:'DIRECTION CONFIRM',
+            detail: 'Waits for BTC to move min_move_points after event fire, then locks direction',
+            active: state==='CHECK_ELIGIBILITY', done: state==='VERIFY_HEDGE_LOOP'||state==='EXECUTE'||state==='MANAGING_POSITION',
+            col: state==='CHECK_ELIGIBILITY'?'#1a1200':'#111827', border: state==='CHECK_ELIGIBILITY'?col:'#1f2937', pulse:state==='CHECK_ELIGIBILITY',
+          },
+          {
+            icon: state==='VERIFY_HEDGE_LOOP'?'⚡':'⬜', label:'VERIFY HEDGE',
+            detail: '4 option conditions must pass simultaneously after direction confirmed',
+            active: state==='VERIFY_HEDGE_LOOP', done: state==='EXECUTE'||state==='MANAGING_POSITION'||state==='PARTIAL_BOOKING',
+            col: state==='VERIFY_HEDGE_LOOP'?'#2e1065':'#111827', border: state==='VERIFY_HEDGE_LOOP'?'#a78bfa':'#1f2937', pulse:state==='VERIFY_HEDGE_LOOP',
+          },
+          {
+            evtType:'trade_entered', icon: state==='EXECUTE'?'⚡':['MANAGING_POSITION','PARTIAL_BOOKING','FORCE_CLOSE'].includes(state)?'✓':'⬜',
+            label:'EXECUTE', detail: pos.option_symbol?`${pos.option_symbol} @ $${pos.hedge_fill_price}`:'Buy hedge + enter futures',
+            active:state==='EXECUTE', done:['MANAGING_POSITION','PARTIAL_BOOKING','FORCE_CLOSE'].includes(state),
+            col:state==='EXECUTE'?'#1a3a1a':'#111827', border:state==='EXECUTE'?col:'#1f2937',
+          },
+          {
+            icon:['MANAGING_POSITION','PARTIAL_BOOKING'].includes(state)?'⚡':'⬜', label:'MANAGING',
+            detail:(() => { const fp=pos.futures_unrealized_pnl||0,hp=pos.hedge_unrealized_pnl||0; return ['MANAGING_POSITION','PARTIAL_BOOKING'].includes(state)?`Fut ${fp>=0?'+':''}$${fp.toFixed(0)} · Hedge ${hp>=0?'+':''}$${hp.toFixed(0)}`:'Watch PnL · partial sell · full TP'; })(),
+            active:['MANAGING_POSITION','PARTIAL_BOOKING'].includes(state), done:state==='FORCE_CLOSE',
+            col:['MANAGING_POSITION','PARTIAL_BOOKING'].includes(state)?'#0a2a1a':'#111827', border:['MANAGING_POSITION','PARTIAL_BOOKING'].includes(state)?col:'#1f2937', pulse:state==='MANAGING_POSITION',
+          },
+          {
+            evtType:'squareoff', icon:state==='FORCE_CLOSE'?'🔴':'⬜', label:'SQUAREOFF',
+            detail:'Close profitable leg first (limit for option) → then futures (market)',
+            active:state==='FORCE_CLOSE', done:false, col:state==='FORCE_CLOSE'?'#1a0a0a':'#111827', border:state==='FORCE_CLOSE'?'#f87171':'#1f2937', pulse:state==='FORCE_CLOSE',
+          },
+        ];
+        // Shared enhanced node renderer for volatile trader
+        const _node2 = (n, idx) => {
+          const ts2 = n.evtType ? _evtTs(n.evtType) : null;
+          const nodeCol2 = n.done ? '#4ade80' : n.active ? col : '#334155';
+          const nodeBg2  = n.done ? '#052e16' : n.active ? (n.col||'#0a1020') : '#080f1c';
+          const bdrCol2  = n.done ? '#166534' : n.active ? (n.border||col) : '#1e2d45';
+          const glowStr2 = n.active ? `box-shadow:0 0 14px ${bdrCol2}44` : (n.done ? 'box-shadow:0 0 5px #166534' : '');
+          return `
+          <div style="background:${nodeBg2};border:1px solid ${bdrCol2};border-radius:8px;padding:9px 13px;position:relative;${glowStr2};${n.pulse?'animation:wf-pulse-anim 1.4s ease-in-out infinite':''}">
+            ${n.active?`<div style="position:absolute;top:-4px;right:-4px;width:9px;height:9px;border-radius:50%;background:${bdrCol2};box-shadow:0 0 9px ${bdrCol2};animation:wf-pulse-anim 1s infinite"></div>`:''}
+            <div style="display:flex;align-items:center;gap:8px;margin-bottom:3px">
+              <div style="width:18px;height:18px;border-radius:50%;background:${n.done?'#166534':n.active?bdrCol2+'22':'#0f1829'};border:1px solid ${n.done?'#22c55e':n.active?bdrCol2:'#1e2d45'};display:flex;align-items:center;justify-content:center;flex-shrink:0">
+                ${n.done?`<span style="font-size:8px;color:#4ade80;font-weight:700">✓</span>`:`<span style="font-size:8px;color:${n.active?col:'#334155'};font-weight:700">${idx+1}</span>`}
+              </div>
+              <span style="font-size:13px;line-height:1">${n.icon}</span>
+              <span style="font-size:10px;font-weight:700;color:${nodeCol2};letter-spacing:.02em">${n.label}</span>
+              ${n.active?`<span style="font-size:7px;font-weight:700;color:${col};background:${col}15;border:1px solid ${col}44;border-radius:8px;padding:1px 6px;letter-spacing:.06em">NOW</span>`:''}
+              ${ts2?`<span style="margin-left:auto;font-size:8px;color:#1e3a5f;font-family:monospace;background:#040b14;padding:1px 5px;border-radius:3px">@ ${ts2} IST</span>`:''}
+            </div>
+            <div style="font-size:8px;color:${n.active?'#94a3b8':n.done?'#4b5563':'#293748'};line-height:1.5;padding-left:26px">${n.detail}</div>
+          </div>`;
+        };
+        const conn2 = (c='#1e2d45') => `
+          <div style="display:flex;justify-content:center;align-items:center;height:16px">
+            <div style="display:flex;flex-direction:column;align-items:center">
+              <div style="width:2px;height:8px;background:${c}"></div>
+              <div style="width:0;height:0;border-left:4px solid transparent;border-right:4px solid transparent;border-top:5px solid ${c}"></div>
+            </div>
+          </div>`;
+
+        // Progress tracking for volatile
+        const volActiveIdx = nodes.findIndex(n => n.active);
+        const volDoneCount = nodes.filter(n => n.done).length;
+        const volProgPct   = Math.round((volDoneCount / nodes.length) * 100);
+
+        let html2 = `
+          <div style="background:#06101e;border:1px solid ${col}33;border-radius:10px;padding:14px 16px">
+            <!-- Header -->
+            <div style="display:flex;align-items:center;gap:10px;margin-bottom:12px;padding-bottom:10px;border-bottom:1px solid ${col}1a">
+              <div style="width:10px;height:10px;border-radius:50%;background:${col};box-shadow:0 0 10px ${col}"></div>
+              <span style="font-weight:700;color:${col};font-size:12px;letter-spacing:.02em">⚡ VOLATILE EVENT TRADER</span>
+              <span style="font-size:9px;color:#334155;margin-left:2px">Event-driven · macro straddle</span>
+              <span style="margin-left:auto;font-size:9px;padding:3px 10px;border-radius:4px;font-weight:700;
+                           background:${state==='SLEEP'?'#0f1829':'#050f1a'};color:${state==='SLEEP'?'#334155':col};
+                           border:1px solid ${state==='SLEEP'?'#1e2d45':col+'66'};letter-spacing:.04em">${state}</span>
+            </div>
+            <!-- Progress bar -->
+            <div style="margin-bottom:10px">
+              <div style="display:flex;justify-content:space-between;font-size:7px;color:#334155;margin-bottom:3px">
+                <span style="font-weight:600;color:#94a3b8">${volActiveIdx>=0?nodes[volActiveIdx].label:'SLEEP'}</span>
+                <span>Step ${Math.max(volDoneCount,volActiveIdx>=0?volActiveIdx:0)+1} of ${nodes.length} · ${volProgPct}%</span>
+              </div>
+              <div style="background:#0f1829;border-radius:3px;height:4px;overflow:hidden;border:1px solid #1e2d45">
+                <div style="height:100%;width:${volProgPct}%;background:linear-gradient(90deg,${col}88,${col});border-radius:3px"></div>
+              </div>
+              <div style="display:flex;justify-content:space-between;margin-top:4px">
+                ${nodes.map((n,i) => `<div style="width:${Math.floor(100/nodes.length)-1}%;height:2px;border-radius:1px;background:${n.done?col:n.active?col+'88':'#1e2d45'};${n.active?'box-shadow:0 0 5px '+col:''}"></div>`).join('')}
+              </div>
+            </div>
+            <!-- Neural pipeline -->
+            <div style="display:flex;flex-direction:column;gap:0">`;
+        nodes.forEach((n, i) => {
+          html2 += _node2(n, i);
+          if (i < nodes.length-1) html2 += conn2(nodes[i+1]?.done||nodes[i+1]?.active ? col+'55' : '#1e2d45');
+        });
+        html2 += '</div></div>';
+        return html2;
+      }
+
+      // ── BULL / BEAR node map ──────────────────────────────────────────
+      const locked = pos.locked_high_line;
+      const obWait = !!pos.ob_wait_active;
+      const ar     = pos.analysis_report || {};
+      const oz     = ar.ob_zone || {};
+      const label  = key === 'bull' ? '📈 BULLISH TRADER' : '📉 BEARISH TRADER';
+      const ztype  = key === 'bull' ? 'demand' : 'supply';
+      const dir    = key === 'bull' ? 'LONG futures + PUT hedge' : 'SHORT futures + CALL hedge';
+
+      // Node definitions — each has id, label, detail, active flag, done flag, color override
+      const nodes = [
+        {
+          id: 'win', evtType: 'window_open',
+          icon: inWin ? '🟢' : '⚫',
+          label: inWin ? 'WINDOW OPEN' : 'WINDOW CLOSED',
+          detail: inWin
+            ? `${String(pos.in_window?'Active':'')} · ${dir}`
+            : 'Waiting for trading window',
+          active: inWin && state === 'SLEEP' && !locked,
+          done:   inWin,
+          col:    inWin ? '#14532d' : '#111827',
+          border: inWin ? col : '#1f2937',
+        },
+        {
+          id: 'ob',
+          icon: obWait ? '⏳' : locked ? '🔒' : ar.analysis_time ? '✗' : '⬜',
+          label: obWait ? 'OB WATCH MODE'
+               : locked ? 'OB ZONE LOCKED'
+               : ar.error ? 'NO OB FOUND'
+               : 'OB ANALYSIS',
+          detail: obWait
+            ? `No ${ztype} zone at open · scanning ${ar.tf||'15m'} candles`
+            : locked
+            ? `$${Math.round(locked)} mid · ${oz.grade||''} (${oz.score||0}) · ${ar.tf||'?'} TF`
+            : ar.error || 'Fetches zones at window open',
+          active: state === 'CHECK_ELIGIBILITY' || (inWin && !locked && !obWait && !ar.analysis_time),
+          done:   !!locked,
+          col:    obWait ? '#1c1107' : locked ? '#14532d' : ar.error ? '#1a0a0a' : '#111827',
+          border: obWait ? '#f59e0b' : locked ? col : ar.error ? '#7f1d1d' : '#1f2937',
+          pulse:  obWait,
+        },
+        {
+          id: 'price',
+          icon: pos.eligible === true ? '✓' : locked && !obWait ? '👁' : '⬜',
+          label: pos.eligible === true ? 'PRICE IN ZONE'
+               : locked && !obWait ? 'WATCHING PRICE'
+               : 'PRICE CHECK',
+          detail: locked
+            ? (() => {
+                const d = Math.abs(price - locked);
+                const maxD = (S.config || {})[key+'_max_distance_from_line'] || '?';
+                return `Dist ${Math.round(d)}pts · need ≤${maxD}pts`;
+              })()
+            : 'Waits for price to approach OB zone mid',
+          active: !!locked && !obWait && pos.eligible !== true,
+          done:   pos.eligible === true,
+          col:    pos.eligible === true ? '#14532d' : locked && !obWait ? '#0c1a07' : '#111827',
+          border: pos.eligible === true ? col : locked && !obWait ? col+'66' : '#1f2937',
+          pulse:  !!locked && !obWait && pos.eligible !== true,
+        },
+        {
+          id: 'verify',
+          icon: state === 'VERIFY_HEDGE_LOOP' ? '⚡' : state === 'EXECUTE' ? '✓' : '⬜',
+          label: state === 'VERIFY_HEDGE_LOOP' ? 'VERIFYING HEDGE' : 'HEDGE CHECK',
+          detail: state === 'VERIFY_HEDGE_LOOP'
+            ? (() => {
+                const checks = [
+                  { k:'prox_ok',   l:'Proximity' },
+                  { k:'prem_ok',   l:'Premium'   },
+                  { k:'tv_ok',     l:'Time Value' },
+                  { k:'spread_ok', l:'Spread'     },
+                ].map(c => {
+                  const v = mon[c.k];
+                  const ic = v === true ? '✓' : v === false ? '✗' : '·';
+                  return `${ic} ${c.l}`;
+                }).join(' &nbsp;');
+                return checks;
+              })()
+            : '4 conditions must all pass simultaneously',
+          active: state === 'VERIFY_HEDGE_LOOP',
+          done:   ['EXECUTE','MANAGING_POSITION','PARTIAL_BOOKING','FORCE_CLOSE'].includes(state),
+          col:    state === 'VERIFY_HEDGE_LOOP' ? '#2e1065' : '#111827',
+          border: state === 'VERIFY_HEDGE_LOOP' ? '#a78bfa' : '#1f2937',
+          pulse:  state === 'VERIFY_HEDGE_LOOP',
+        },
+        {
+          id: 'exec', evtType: 'trade_entered',
+          icon: ['MANAGING_POSITION','PARTIAL_BOOKING','FORCE_CLOSE'].includes(state) ? '✓'
+              : state === 'EXECUTE' ? '⚡' : '⬜',
+          label: state === 'EXECUTE' ? 'EXECUTING' : 'EXECUTE',
+          detail: pos.option_symbol
+            ? `${pos.option_symbol} · $${pos.hedge_fill_price || '?'} · Fut @ $${pos.futures_entry || '?'}`
+            : 'Buy hedge · Enter futures simultaneously',
+          active: state === 'EXECUTE',
+          done:   ['MANAGING_POSITION','PARTIAL_BOOKING','FORCE_CLOSE'].includes(state),
+          col:    state === 'EXECUTE' ? '#1a3a1a' : '#111827',
+          border: state === 'EXECUTE' ? col : '#1f2937',
+          pulse:  state === 'EXECUTE',
+        },
+        {
+          id: 'manage',
+          icon: ['PARTIAL_BOOKING'].includes(state) ? '📊'
+              : state === 'MANAGING_POSITION' ? '⚡' : '⬜',
+          label: state === 'PARTIAL_BOOKING' ? 'PARTIAL BOOKING'
+               : state === 'MANAGING_POSITION' ? 'MANAGING' : 'MANAGE',
+          detail: (() => {
+            if (!['MANAGING_POSITION','PARTIAL_BOOKING'].includes(state)) return 'Watch PnL · partial sell · full TP';
+            const fp = pos.futures_unrealized_pnl || 0, hp = pos.hedge_unrealized_pnl || 0;
+            const tot = fp + hp;
+            const tgt = pos.session_pnl_target || 600;
+            return `Fut ${fp>=0?'+':''}$${fp.toFixed(0)} · Hedge ${hp>=0?'+':''}$${hp.toFixed(0)} · Tot ${tot>=0?'+':''}$${tot.toFixed(0)} · Target $${tgt}`;
+          })(),
+          active: ['MANAGING_POSITION','PARTIAL_BOOKING'].includes(state),
+          done:   state === 'FORCE_CLOSE',
+          col:    ['MANAGING_POSITION','PARTIAL_BOOKING'].includes(state) ? '#0a2a1a' : '#111827',
+          border: ['MANAGING_POSITION','PARTIAL_BOOKING'].includes(state) ? col : '#1f2937',
+          pulse:  state === 'MANAGING_POSITION',
+        },
+        {
+          id: 'sq', evtType: 'squareoff',
+          icon: state === 'FORCE_CLOSE' ? '🔴' : '⬜',
+          label: state === 'FORCE_CLOSE' ? 'SQUAREOFF' : 'SQUAREOFF',
+          detail: 'Close profitable leg first → then other · Limit for options, market for futures',
+          active: state === 'FORCE_CLOSE',
+          done:   false,
+          col:    state === 'FORCE_CLOSE' ? '#1a0a0a' : '#111827',
+          border: state === 'FORCE_CLOSE' ? '#f87171' : '#1f2937',
+          pulse:  state === 'FORCE_CLOSE',
+        },
+      ];
+
+      // Enhanced node renderer
+      const _node = (n, idx, total) => {
+        const ts = n.evtType ? _evtTs(n.evtType) : null;
+        const stepNum = idx + 1;
+        const nodeCol = n.done ? '#4ade80' : n.active ? col : '#334155';
+        const nodeBg  = n.done ? '#052e16' : n.active ? (n.col||'#0a1020') : '#080f1c';
+        const bdrCol  = n.done ? '#166534' : n.active ? (n.border||col) : '#1e2d45';
+        const glowStr = n.active ? `box-shadow:0 0 14px ${bdrCol}44,inset 0 0 8px ${bdrCol}11` : (n.done ? 'box-shadow:0 0 6px #166534' : '');
+        return `
+        <div style="background:${nodeBg};border:1px solid ${bdrCol};border-radius:8px;
+                    padding:10px 14px;position:relative;${glowStr};
+                    ${n.pulse?'animation:wf-pulse-anim 1.4s ease-in-out infinite':''}
+                    transition:border-color .3s,box-shadow .3s">
+          <!-- Active indicator dot -->
+          ${n.active ? `<div style="position:absolute;top:-4px;right:-4px;width:10px;height:10px;border-radius:50%;
+                           background:${bdrCol};box-shadow:0 0 10px ${bdrCol};animation:wf-pulse-anim 1s infinite"></div>` : ''}
+          <!-- Step badge + icon + label row -->
+          <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px">
+            <div style="width:20px;height:20px;border-radius:50%;background:${n.done?'#166534':n.active?bdrCol+'22':'#0f1829'};
+                        border:1px solid ${n.done?'#22c55e':n.active?bdrCol:'#1e2d45'};
+                        display:flex;align-items:center;justify-content:center;flex-shrink:0">
+              ${n.done
+                ? `<span style="font-size:9px;color:#4ade80;font-weight:700">✓</span>`
+                : `<span style="font-size:8px;color:${n.active?col:'#334155'};font-weight:700">${stepNum}</span>`}
+            </div>
+            <span style="font-size:14px;line-height:1">${n.icon}</span>
+            <span style="font-size:10px;font-weight:700;color:${nodeCol};letter-spacing:.02em">${n.label}</span>
+            ${n.active ? `<span style="margin-left:4px;font-size:7px;font-weight:700;color:${col};background:${col}15;border:1px solid ${col}44;border-radius:8px;padding:1px 6px;letter-spacing:.06em">CURRENT</span>` : ''}
+            ${ts ? `<span style="margin-left:auto;font-size:8px;color:#1e3a5f;font-family:monospace;background:#040b14;padding:1px 5px;border-radius:3px">@ ${ts} IST</span>` : ''}
+          </div>
+          <!-- Detail text -->
+          <div style="font-size:8px;color:${n.active?'#94a3b8':n.done?'#4b5563':'#293748'};line-height:1.5;padding-left:28px">${n.detail}</div>
+        </div>`;
+      };
+
+      // Connector arrow between nodes
+      const connector = (color='#1e2d45', active=false) =>
+        `<div style="display:flex;justify-content:center;align-items:center;height:18px">
+           <div style="display:flex;flex-direction:column;align-items:center;gap:0">
+             <div style="width:2px;height:10px;background:${color}"></div>
+             <div style="width:0;height:0;border-left:4px solid transparent;border-right:4px solid transparent;border-top:5px solid ${color}"></div>
+           </div>
+         </div>`;
+
+      // Step progress bar at top
+      const activeIdx  = nodes.findIndex(n => n.active);
+      const doneCount  = nodes.filter(n => n.done).length;
+      const progPct    = Math.round((doneCount / nodes.length) * 100);
+      const progressBar = `
+        <div style="margin-bottom:10px">
+          <div style="display:flex;justify-content:space-between;font-size:7px;color:#334155;margin-bottom:3px">
+            <span style="font-weight:600;color:#94a3b8">${activeIdx>=0?nodes[activeIdx].label:'SLEEP'}</span>
+            <span>Step ${Math.max(doneCount,activeIdx>=0?activeIdx:0)+1} of ${nodes.length} · ${progPct}%</span>
+          </div>
+          <div style="background:#0f1829;border-radius:3px;height:4px;overflow:hidden;border:1px solid #1e2d45">
+            <div style="height:100%;width:${progPct}%;background:linear-gradient(90deg,${col}88,${col});border-radius:3px;transition:width .5s"></div>
+          </div>
+          <!-- Step dots -->
+          <div style="display:flex;justify-content:space-between;margin-top:4px">
+            ${nodes.map((n,i) => `
+              <div style="width:${Math.floor(100/nodes.length)-1}%;height:2px;border-radius:1px;
+                          background:${n.done?col:n.active?col+'88':'#1e2d45'};
+                          ${n.active?'box-shadow:0 0 5px '+col:''}"></div>`).join('')}
+          </div>
+        </div>`;
+
+      let html = `
+        <div style="background:#06101e;border:1px solid ${col}33;border-radius:10px;padding:14px 16px">
+          <!-- Header -->
+          <div style="display:flex;align-items:center;gap:10px;margin-bottom:12px;padding-bottom:10px;border-bottom:1px solid ${col}1a">
+            <div style="width:10px;height:10px;border-radius:50%;background:${col};box-shadow:0 0 10px ${col}"></div>
+            <span style="font-weight:700;color:${col};font-size:12px;letter-spacing:.02em">${label}</span>
+            <span style="font-size:9px;color:#334155;margin-left:2px">${dir}</span>
+            <span style="margin-left:auto;font-size:9px;padding:3px 10px;border-radius:4px;font-weight:700;
+                         background:${state==='SLEEP'?'#0f1829':'#050f1a'};
+                         color:${state==='SLEEP'?'#334155':col};border:1px solid ${state==='SLEEP'?'#1e2d45':col+'66'};
+                         letter-spacing:.04em">${state}</span>
+          </div>
+          <!-- Progress bar -->
+          ${progressBar}
+          <!-- Neural pipeline -->
+          <div style="display:flex;flex-direction:column;gap:0">`;
+
+      nodes.forEach((n, i) => {
+        html += _node(n, i, nodes.length);
+        if (i < nodes.length - 1) {
+          const nextActive = nodes[i+1]?.active || nodes[i+1]?.done;
+          html += connector(nextActive ? col + '55' : '#1e2d45', !!nextActive);
+        }
+      });
+
+      html += '</div></div>';
+      return html;
+    }
+
+    function _wfLegend() {
+      return `
+        <div style="display:flex;align-items:center;gap:20px;flex-wrap:wrap;padding:8px 12px;margin-top:8px;
+                    border-top:1px solid #1a2540;background:#040b14;border-radius:0 0 8px 8px">
+          <span style="font-size:8px;color:#334155">⟳ Updates every 2s · live WebSocket</span>
+          <span style="margin-left:auto;display:flex;gap:14px;font-size:8px;font-weight:600">
+            <span><span style="display:inline-block;width:8px;height:8px;border-radius:2px;background:#4ade80;margin-right:4px;vertical-align:middle"></span><span style="color:#4ade80">DONE</span></span>
+            <span><span style="display:inline-block;width:8px;height:8px;border-radius:2px;background:#a78bfa;margin-right:4px;vertical-align:middle;animation:wf-pulse-anim 1.4s infinite"></span><span style="color:#a78bfa">ACTIVE</span></span>
+            <span><span style="display:inline-block;width:8px;height:8px;border-radius:2px;background:#f59e0b;margin-right:4px;vertical-align:middle"></span><span style="color:#f59e0b">WATCHING</span></span>
+            <span><span style="display:inline-block;width:8px;height:8px;border-radius:2px;background:#1e2d45;margin-right:4px;vertical-align:middle"></span><span style="color:#334155">IDLE</span></span>
+          </span>
+        </div>`;
+    }
+
+    // ══════════════════════════════════ CLOCK-FACE TIME PICKER ═══════════════
+    const _CP = {
+      mode: 'H', h: 0, m: 0,
+      hKey: '', mKey: '',           // config keys (for Settings tab)
+      hEl: null, mEl: null,         // raw <input> elements to update (trader card)
+      onApply: null,                // callback(h, m)
+      label: '',
+    };
+
+    function _cpOpen(hVal, mVal, hKey, mKey, onApply, label, anchorEl) {
+      _CP.h = hVal; _CP.m = mVal;
+      _CP.hKey = hKey; _CP.mKey = mKey;
+      _CP.onApply = onApply;
+      _CP.label = label || '';
+      _cpSetMode('H');
+
+      const root = el('cp-root');
+      root.style.display = 'block';
+      setText('cp-label', label);
+
+      // Position near anchor
+      if (anchorEl) {
+        const r = anchorEl.getBoundingClientRect();
+        let top = r.bottom + 6, left = r.left;
+        if (top + 340 > window.innerHeight) top = r.top - 340;
+        if (left + 260 > window.innerWidth)  left = window.innerWidth - 270;
+        root.style.top  = Math.max(4, top)  + 'px';
+        root.style.left = Math.max(4, left) + 'px';
+      } else {
+        root.style.top  = '50%';
+        root.style.left = '50%';
+        root.style.transform = 'translate(-50%,-50%)';
+      }
+
+      // Close on outside click
+      setTimeout(() => {
+        document.addEventListener('mousedown', _cpOutsideClose, { once: true });
+      }, 50);
+    }
+
+    function _cpOutsideClose(e) {
+      const root = el('cp-root');
+      if (root && !root.contains(e.target)) { root.style.display = 'none'; }
+      else { document.addEventListener('mousedown', _cpOutsideClose, { once: true }); }
+    }
+
+    function _cpSetMode(mode) {
+      _CP.mode = mode;
+      const segH = el('cp-seg-h'), segM = el('cp-seg-m');
+      if (segH) { segH.className = 'cp-seg' + (mode==='H'?' active':''); segH.textContent = String(_CP.h).padStart(2,'0'); }
+      if (segM) { segM.className = 'cp-seg' + (mode==='M'?' active':''); segM.textContent = String(_CP.m).padStart(2,'0'); }
+      setText('cp-mode-hint', mode === 'H' ? 'tap to select hour (outer 1–12 · inner 13–0)' : 'tap to select minute');
+      _cpBuildFace();
+      _cpDrawHand();
+    }
+
+    function _cpBuildFace() {
+      const ns = 'http://www.w3.org/2000/svg';
+      const numsG  = document.getElementById('cp-nums');
+      const ticksG = document.getElementById('cp-ticks');
+      if (!numsG || !ticksG) return;
+      numsG.innerHTML  = '';
+      ticksG.innerHTML = '';
+
+      const R_OUT = 78, R_IN = 52;  // outer and inner ring radii
+
+      if (_CP.mode === 'H') {
+        // Outer ring: 12, 1–11  → hour 12 at top, then 1,2,...
+        // Inner ring: 0, 13–23 → 0 at top (midnight)
+        for (let i = 0; i < 12; i++) {
+          const angle = (i * 30 - 90) * Math.PI / 180;
+          const hourOuter = i === 0 ? 12 : i;
+          const hourInner = i === 0 ? 0  : i + 12;
+          [
+            { r: R_OUT, hour: hourOuter, isOuter: true  },
+            { r: R_IN,  hour: hourInner, isOuter: false },
+          ].forEach(({ r, hour }) => {
+            const x = r * Math.cos(angle), y = r * Math.sin(angle);
+            const isSel = hour === _CP.h;
+            const g = document.createElementNS(ns, 'g');
+            g.setAttribute('class', 'cp-num' + (isSel ? ' cp-sel' : ''));
+            g.dataset.val = hour;
+            const c = document.createElementNS(ns, 'circle');
+            c.setAttribute('cx', x.toFixed(1)); c.setAttribute('cy', y.toFixed(1));
+            c.setAttribute('r', '13'); c.setAttribute('fill', isSel ? '#f59e0b' : 'transparent');
+            const t = document.createElementNS(ns, 'text');
+            t.setAttribute('x', x.toFixed(1)); t.setAttribute('y', y.toFixed(1));
+            t.setAttribute('text-anchor', 'middle'); t.setAttribute('dominant-baseline', 'central');
+            t.setAttribute('font-size', r === R_OUT ? '11' : '9');
+            t.setAttribute('fill', isSel ? '#000' : (r === R_OUT ? '#e2e8f0' : '#9ca3af'));
+            t.setAttribute('font-weight', isSel ? 'bold' : 'normal');
+            t.textContent = hour;
+            g.appendChild(c); g.appendChild(t);
+            numsG.appendChild(g);
+          });
+        }
+        // Draw 24 minor ticks
+        for (let i = 0; i < 24; i++) {
+          const angle = (i * 15 - 90) * Math.PI / 180;
+          const x1 = 92 * Math.cos(angle), y1 = 92 * Math.sin(angle);
+          const x2 = 97 * Math.cos(angle), y2 = 97 * Math.sin(angle);
+          const line = document.createElementNS(ns, 'line');
+          ['x1','y1','x2','y2'].forEach((a,i2)=>line.setAttribute(a,[x1,y1,x2,y2][i2].toFixed(1)));
+          line.setAttribute('stroke', '#1e3a5f'); line.setAttribute('stroke-width', '1');
+          ticksG.appendChild(line);
+        }
+      } else {
+        // Minutes: 0–59 around the circle, labels every 5
+        for (let m = 0; m < 60; m++) {
+          const angle = (m * 6 - 90) * Math.PI / 180;
+          const isMaj = m % 5 === 0;
+          const isSel = m === _CP.m;
+          if (isMaj) {
+            const x = R_OUT * Math.cos(angle), y = R_OUT * Math.sin(angle);
+            const g = document.createElementNS(ns, 'g');
+            g.setAttribute('class', 'cp-num' + (isSel ? ' cp-sel' : ''));
+            g.dataset.val = m;
+            const c = document.createElementNS(ns, 'circle');
+            c.setAttribute('cx', x.toFixed(1)); c.setAttribute('cy', y.toFixed(1));
+            c.setAttribute('r', '13'); c.setAttribute('fill', isSel ? '#f59e0b' : 'transparent');
+            const t = document.createElementNS(ns, 'text');
+            t.setAttribute('x', x.toFixed(1)); t.setAttribute('y', y.toFixed(1));
+            t.setAttribute('text-anchor','middle'); t.setAttribute('dominant-baseline','central');
+            t.setAttribute('font-size','10');
+            t.setAttribute('fill', isSel ? '#000' : '#e2e8f0');
+            t.setAttribute('font-weight', isSel ? 'bold' : 'normal');
+            t.textContent = String(m).padStart(2,'0');
+            g.appendChild(c); g.appendChild(t);
+            numsG.appendChild(g);
+          } else {
+            // Minor tick
+            const x1 = 94 * Math.cos(angle), y1 = 94 * Math.sin(angle);
+            const x2 = 99 * Math.cos(angle), y2 = 99 * Math.sin(angle);
+            const line = document.createElementNS(ns, 'line');
+            ['x1','y1','x2','y2'].forEach((a,i2)=>line.setAttribute(a,[x1,y1,x2,y2][i2].toFixed(1)));
+            line.setAttribute('stroke', isSel ? '#f59e0b' : '#1e3a5f');
+            line.setAttribute('stroke-width', '1.5');
+            ticksG.appendChild(line);
+          }
+        }
+      }
+    }
+
+    function _cpDrawHand() {
+      const hand = document.getElementById('cp-hand');
+      const dot  = document.getElementById('cp-sel-dot');
+      if (!hand || !dot) return;
+      let angle;
+      const R_OUT = 78, R_IN = 52;
+      if (_CP.mode === 'H') {
+        const h12 = _CP.h % 12;
+        angle = (h12 * 30 - 90) * Math.PI / 180;
+        const r = _CP.h >= 1 && _CP.h <= 12 ? R_OUT : R_IN;
+        const hx = r * Math.cos(angle), hy = r * Math.sin(angle);
+        hand.setAttribute('x2', hx.toFixed(1)); hand.setAttribute('y2', hy.toFixed(1));
+        dot.setAttribute('cx', hx.toFixed(1)); dot.setAttribute('cy', hy.toFixed(1));
+      } else {
+        angle = (_CP.m * 6 - 90) * Math.PI / 180;
+        const hx = R_OUT * Math.cos(angle), hy = R_OUT * Math.sin(angle);
+        hand.setAttribute('x2', hx.toFixed(1)); hand.setAttribute('y2', hy.toFixed(1));
+        dot.setAttribute('cx', hx.toFixed(1)); dot.setAttribute('cy', hy.toFixed(1));
+      }
+      dot.setAttribute('opacity', '0.9');
+      // Update display segments
+      const segH = el('cp-seg-h'), segM = el('cp-seg-m');
+      if (segH) segH.textContent = String(_CP.h).padStart(2,'0');
+      if (segM) segM.textContent = String(_CP.m).padStart(2,'0');
+    }
+
+    function _cpClick(e) {
+      const svg  = document.getElementById('cp-svg');
+      const rect = svg.getBoundingClientRect();
+      const cx   = rect.left + rect.width  / 2;
+      const cy   = rect.top  + rect.height / 2;
+      const dx   = e.clientX - cx, dy = e.clientY - cy;
+      const dist = Math.sqrt(dx*dx + dy*dy);
+      const maxR = rect.width / 2;
+      if (dist < 10) return;   // too close to center
+
+      let angleDeg = Math.atan2(dy, dx) * 180 / Math.PI + 90;
+      angleDeg = ((angleDeg % 360) + 360) % 360;
+
+      if (_CP.mode === 'H') {
+        const h12 = Math.round(angleDeg / 30) % 12;
+        const normDist = dist / maxR;
+        // Inner ring: dist < ~0.6 of radius
+        if (normDist < 0.6) {
+          _CP.h = h12 === 0 ? 0 : h12 + 12;   // 0 at midnight, 13–23
+        } else {
+          _CP.h = h12 === 0 ? 12 : h12;        // 1–12
+        }
+        _cpSetMode('M');
+      } else {
+        _CP.m = Math.round(angleDeg / 6) % 60;
+        _cpBuildFace();
+        _cpDrawHand();
+      }
+    }
+
+    function _cpConfirm() {
+      el('cp-root').style.display = 'none';
+      if (_CP.onApply) _CP.onApply(_CP.h, _CP.m);
+    }
+    function _cpCancel() { el('cp-root').style.display = 'none'; }
+
+    // ── Time-pick button renderer ──────────────────────────────────────────────
+    // Renders a styled button that opens the clock picker.
+    // Used in both trader settings and Settings tab.
+    function _tpBtn(hKey, mKey, prefixedHKey, prefixedMKey, label, dh, dm, onChange) {
+      const h  = CFG[prefixedHKey] ?? dh ?? 0;
+      const m  = CFG[prefixedMKey] ?? dm ?? 0;
+      const id = `tp-${prefixedHKey}-${prefixedMKey}`;
+      // Store callback reference globally
+      window['_tp_cb_' + id] = onChange;
+      return `<button class="tpick-btn" id="${id}"
+        onclick="_cpOpen(
+          parseInt(CFG['${prefixedHKey}']??${dh}),
+          parseInt(CFG['${prefixedMKey}']??${dm}),
+          '${prefixedHKey}','${prefixedMKey}',
+          function(h,m){ window['_tp_cb_${id}'](h,m,'${prefixedHKey}','${prefixedMKey}'); },
+          '${label}', document.getElementById('${id}')
+        )">
+        <span class="tpick-icon">🕐</span>
+        <span id="${id}-txt">${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}</span>
+      </button>`;
+    }
+
+    function _tpApplyTraderCard(h, m, hKey, mKey) {
+      // Update the hidden inputs and fire change event
+      const pfxH = document.querySelector(`input[data-k="${hKey}"]`);
+      const pfxM = document.querySelector(`input[data-k="${mKey}"]`);
+      if (pfxH) { pfxH.value = h; pfxH.dispatchEvent(new Event('input')); }
+      if (pfxM) { pfxM.value = m; pfxM.dispatchEvent(new Event('input')); }
+      // Update the button text
+      const id  = `tp-${hKey}-${mKey}`;
+      const txt = el(id + '-txt');
+      if (txt) txt.textContent = String(h).padStart(2,'0') + ':' + String(m).padStart(2,'0');
+    }
+
+    function _tpApplySettings(h, m, hKey, mKey) {
+      // onTimeChange-equivalent for Settings tab
+      const oh = CFG[hKey] ?? 0, om = CFG[mKey] ?? 0;
+      if (h !== oh) cfgEdits[hKey] = h; else delete cfgEdits[hKey];
+      if (m !== om) cfgEdits[mKey] = m; else delete cfgEdits[mKey];
+      const id  = `tp-${hKey}-${mKey}`;
+      const txt = el(id + '-txt');
+      if (txt) txt.textContent = String(h).padStart(2,'0') + ':' + String(m).padStart(2,'0');
+      const chg = h !== oh || m !== om;
+      const wEl = el(`si-w-${hKey}-${mKey}`);
+      if (wEl) wEl.textContent = chg ? `was: ${String(oh).padStart(2,'0')}:${String(om).padStart(2,'0')}` : '';
+      const has = Object.keys(cfgEdits).length > 0;
+      el('save-btn').disabled = !has;
+      setText('save-hint', has ? Object.keys(cfgEdits).length + ' unsaved change(s)' : '');
     }
 
     // ── Render trade history table (live update by ID) ─────────────────
@@ -5687,16 +6971,24 @@ async function _updateSessionBanner() {
           if (sub.timepicks && sub.timepicks.length) {
             html += `<div style="margin-bottom:8px">${subLabel}`;
             sub.timepicks.forEach(tp => {
-              const h = String(CFG[tp.hkey] ?? tp.dh ?? 0).padStart(2, '0');
-              const m = String(CFG[tp.mkey] ?? tp.dm ?? 0).padStart(2, '0');
-              const tid = `si-${tp.hkey}-${tp.mkey}`;
-              html += `<div style="display:flex;gap:8px;align-items:center;margin-bottom:5px">
-            <span class="lb" style="min-width:110px;flex-shrink:0">${tp.label}</span>
-            <input id="${tid}" class="inp" type="time" value="${h}:${m}"
-              style="max-width:110px;padding:2px 6px;color:#f59e0b;font-size:12px"
-              oninput="onTimeChange('${tp.hkey}','${tp.mkey}',this.value)">
-            <span id="si-w-${tp.hkey}-${tp.mkey}" class="gr" style="font-size:9px"></span>
-          </div>`;
+              const h   = CFG[tp.hkey] ?? tp.dh ?? 0;
+              const m   = CFG[tp.mkey] ?? tp.dm ?? 0;
+              const btnId = `tp-${tp.hkey}-${tp.mkey}`;
+              html += `<div style="display:flex;gap:10px;align-items:center;margin-bottom:6px">
+                <span class="lb" style="min-width:110px;flex-shrink:0">${tp.label}</span>
+                <button class="tpick-btn" id="${btnId}"
+                  onclick="_cpOpen(
+                    parseInt(CFG['${tp.hkey}']??${tp.dh}),
+                    parseInt(CFG['${tp.mkey}']??${tp.dm}),
+                    '${tp.hkey}','${tp.mkey}',
+                    function(h,m){_tpApplySettings(h,m,'${tp.hkey}','${tp.mkey}');},
+                    '${tp.label}', document.getElementById('${btnId}')
+                  )">
+                  <span style="font-size:10px;color:#4b5563">🕐</span>
+                  <span id="${btnId}-txt">${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}</span>
+                </button>
+                <span id="si-w-${tp.hkey}-${tp.mkey}" class="gr" style="font-size:9px"></span>
+              </div>`;
             });
             html += '</div>';
             if (!sub.params || !sub.params.length) return;
@@ -5894,210 +7186,378 @@ async function _updateSessionBanner() {
     let _accData    = { bull: null, bear: null, vol: null };
     let _accTrades  = { bull: [], bear: [], vol: [] };
     let _accSessions= { bull: [], bear: [], vol: [] };
-    let _accFilter  = { bull: 'history', bear: 'history', vol: 'history' };  // default: DB history (persistent, survives restart)
-    let _accApiData = null;   // result from /api/accounts (executor session_realized_pnl)
-    let _accRefreshTimer = null;
+    let _accFilter  = { bull: 'history', bear: 'history', vol: 'history' };
+    let _accApiData = null;
+    let _volEvents  = [];
+    let _accActiveTab = 'combined';   // which tab is currently shown
+
+    // Tab definitions
+    const _ACC_TABS = [
+      { key:'combined', label:'Combined',      icon:'🌐', col:'#60a5fa' },
+      { key:'bull',     label:'Bullish',        icon:'📈', col:'#4ade80' },
+      { key:'bear',     label:'Bearish',        icon:'📉', col:'#f87171' },
+      { key:'vol',      label:'Volatile Event', icon:'⚡', col:'#f59e0b' },
+    ];
 
     async function _loadAllAccounts() {
       const root = el('accounts-root');
       if (!root) return;
 
-      // First render: build scaffold immediately
+      // Build scaffold once
       if (!root.innerHTML.trim()) {
         root.innerHTML = `
-          <div style="display:flex;align-items:center;justify-content:space-between;flex-shrink:0;margin-bottom:4px">
-            <span style="font-weight:bold;color:#f59e0b;font-size:13px;letter-spacing:.04em">💰 Virtual Accounts — All Traders</span>
+          <!-- ── Header ── -->
+          <div style="display:flex;align-items:center;justify-content:space-between;flex-shrink:0;padding-bottom:0;margin-bottom:0">
+            <div style="display:flex;align-items:center;gap:8px">
+              <span style="font-weight:700;color:#f59e0b;font-size:14px;letter-spacing:.04em">💰 Virtual Accounts</span>
+              <span style="font-size:9px;color:#475569;padding:1px 8px;border:1px solid #1e2d45;border-radius:10px">$100k per trader · independent</span>
+            </div>
             <div style="display:flex;gap:8px;align-items:center">
-              <span id="acc-last-refresh" style="font-size:9px;color:#374151">—</span>
-              <button onclick="_loadAllAccounts()" style="font-size:9px;padding:2px 10px;background:#0f172a;border:1px solid #374151;border-radius:3px;color:#9ca3af;cursor:pointer">↻ Refresh</button>
+              <span id="acc-last-refresh" style="font-size:8px;color:#334155">—</span>
+              <button onclick="_loadAllAccounts()" style="font-size:9px;padding:2px 10px;background:#0a1628;border:1px solid #1e3a5f;border-radius:4px;color:#60a5fa;cursor:pointer">↻ Refresh</button>
             </div>
           </div>
-          <div id="acc-combined-bar" style="display:grid;grid-template-columns:repeat(6,1fr);gap:4px;flex-shrink:0"></div>
-          <div id="acc-traders-grid" style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px;flex:1;min-height:0"></div>`;
+          <!-- ── Tab bar ── -->
+          <div id="acc-tab-bar" style="display:flex;border-bottom:1px solid #1e2d45;flex-shrink:0;margin-top:6px;background:#040b14"></div>
+          <!-- ── Single content panel ── -->
+          <div id="acc-content" style="flex:1;min-height:0;overflow-y:auto;background:#030a15"></div>`;
       }
 
-      // Fetch all data in parallel (paper engine summaries + accounts API)
+      // Fetch all data in parallel
       await Promise.all([
         ...['bull','bear','vol'].map(k => _fetchAccountData(k)),
         fetch('/api/accounts').then(r=>r.json()).then(d=>{ _accApiData = d; }).catch(()=>{}),
+        fetch('/api/volatile/events').then(r=>r.json()).then(d=>{ _volEvents = d.events || []; }).catch(()=>{}),
       ]);
-      _renderCombinedBar();
-      ['bull','bear','vol'].forEach(k => _renderTraderAccount(k));
+
+      _renderAccTabBar();
+      _renderAccContent();
       setText('acc-last-refresh', 'Updated: ' + new Date().toLocaleTimeString());
     }
 
+    function _accSwitchTab(tab) {
+      _accActiveTab = tab;
+      _renderAccTabBar();
+      _renderAccContent();
+    }
+
+    function _renderAccTabBar() {
+      const bar = el('acc-tab-bar'); if (!bar) return;
+      bar.innerHTML = _ACC_TABS.map(t => {
+        const on  = t.key === _accActiveTab;
+        const col = t.col;
+        // Show live badge on trader tabs that have open positions
+        let badge = '';
+        if (t.key !== 'combined') {
+          const api = (_accApiData && _accApiData.traders) ? (_accApiData.traders[t.key] || {}) : {};
+          if (api.has_position) badge = `<span style="width:6px;height:6px;border-radius:50%;background:${col};box-shadow:0 0 5px ${col};display:inline-block;margin-left:5px"></span>`;
+        }
+        return `<button onclick="_accSwitchTab('${t.key}')"
+          style="padding:8px 20px;background:${on?'#060e1d':'transparent'};border:none;border-bottom:2px solid ${on?col:'transparent'};
+                 color:${on?col:'#475569'};font-size:10px;font-weight:${on?'700':'500'};cursor:pointer;
+                 display:flex;align-items:center;gap:5px;letter-spacing:.02em;transition:color .15s;white-space:nowrap">
+          <span>${t.icon}</span><span>${t.label}</span>${badge}
+        </button>`;
+      }).join('');
+    }
+
+    function _renderAccContent() {
+      const pane = el('acc-content'); if (!pane) return;
+      if (_accActiveTab === 'combined') {
+        pane.innerHTML = _buildCombinedHTML();
+      } else {
+        pane.innerHTML = _buildTraderHTML(_accActiveTab);
+      }
+    }
+
     async function _fetchAccountData(key) {
-      const ex = _ACC[key].ex;
       try {
-        // Live summary (balance, equity, open positions, in-memory trades)
-        const summary = await fetch(`/api/forward?trader=${key}`).then(r=>r.json());
-        _accData[key] = summary;
-
-        // Persistent trade history with exact timestamps from DB
-        const hist = await fetch(`/api/trader/${key}/trades?limit=200`).then(r=>r.json());
-        _accTrades[key] = hist.trades || [];
-
-        // Session records
-        const sess = await fetch(`/api/journal/sessions?trader=${key}&limit=50`).then(r=>r.json());
-        _accSessions[key] = sess.sessions || [];
+        const [summary, hist, sess] = await Promise.all([
+          fetch(`/api/forward?trader=${key}`).then(r=>r.json()),
+          fetch(`/api/trader/${key}/trades?limit=200`).then(r=>r.json()),
+          fetch(`/api/journal/sessions?trader=${key}&limit=100`).then(r=>r.json()),
+        ]);
+        _accData[key]     = summary;
+        _accTrades[key]   = hist.trades    || [];
+        _accSessions[key] = sess.sessions  || [];
       } catch(e) {
         console.warn(`[accounts] fetch error for ${key}:`, e);
       }
     }
 
-    function _renderCombinedBar() {
-      const bar = el('acc-combined-bar'); if (!bar) return;
-      let totalBal = 0, totalEquity = 0, totalUnreal = 0, totalOpenPnl = 0, totalRealised = 0, totalTotal = 0;
+    function _buildCombinedHTML() {
+      let totalBal = 0, totalEquity = 0, totalOpenPnl = 0, totalRealised = 0, totalTotal = 0;
+      const traderTotals = {};
       ['bull','bear','vol'].forEach(k => {
-        const d = _accData[k];
-        if (!d) return;
-        totalBal      += d.balance        || 0;
-        totalEquity   += d.equity         || 0;
-        totalUnreal   += d.unrealized_pnl || 0;
-        totalOpenPnl  += d.open_pnl       || 0;
-        totalRealised += d.realized_pnl   || 0;
-        totalTotal    += d.total_pnl      || 0;
+        const d    = _accData[k] || {};
+        const eq   = d.equity         || 0;
+        const bal  = d.balance        || 0;
+        const opnl = d.open_pnl       || 0;
+        const rpnl = d.realized_pnl   || 0;
+        const tpnl = d.total_pnl      || 0;
+        totalBal      += bal;
+        totalEquity   += eq;
+        totalOpenPnl  += opnl;
+        totalRealised += rpnl;
+        totalTotal    += tpnl;
+        traderTotals[k] = { eq, bal, opnl, rpnl, tpnl };
       });
-      // Binance-style combined summary:
-      // Balance = cash; Equity = Balance + Unrealized; Total PnL = Equity - 300k start
-      const _combApi = (_accApiData && _accApiData.combined) ? _accApiData.combined : {};
-      const totalSessReal = _combApi.total_session_realized || 0;
-      const cards = [
-        { label: 'Combined Balance',   val: totalBal,        col: '#4ade80',                                note: 'Cash across all 3 traders after premiums paid and closed trade PnL' },
-        { label: 'Combined Equity',    val: totalEquity,     col: '#60a5fa',                                note: 'Balance + market value of all open positions. Equity = Balance + Unrealized.' },
-        { label: 'Unrealized',         val: totalUnreal,     col: totalUnreal>=0?'#4ade80':'#f87171',       note: 'Market value of all open positions (equity − balance). If closed NOW, this is what you get.' },
-        { label: 'Sess. Realized',     val: totalSessReal,   col: totalSessReal>=0?'#4ade80':'#f87171',     note: 'Combined closed-trade PnL from currently active positions this session (futures + option legs). Resets per position.' },
-        { label: 'Realized PnL',       val: totalRealised,   col: totalRealised>=0?'#4ade80':'#f87171',     note: 'PnL from CLOSED positions only — what has actually been banked from completed trades.' },
-        { label: 'Total PnL',          val: totalTotal,      col: totalTotal>=0?'#4ade80':'#f87171',        note: 'Equity − $300k start. Full picture: realized gains + current open position value change.' },
-      ];
-      const _isAbsCard = l => l === 'Combined Balance' || l === 'Combined Equity';
-      bar.innerHTML = cards.map(c => `
-        <div style="background:#080f1d;border:1px solid #1a2540;border-radius:4px;padding:6px 10px" title="${c.note}">
-          <div style="font-size:8px;text-transform:uppercase;letter-spacing:.08em;color:#374151;margin-bottom:2px">${c.label}</div>
-          <div style="font-size:14px;font-weight:bold;font-family:monospace;color:${c.col}">${_isAbsCard(c.label) ? '$'+Math.abs(c.val).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2}) : _fmtUsdSign(c.val)}</div>
-          <div style="font-size:8px;color:#1e3a5f;margin-top:1px">${c.note}</div>
-        </div>`).join('');
+
+      const _combApi  = (_accApiData && _accApiData.combined) ? _accApiData.combined : {};
+      const _apiT     = (_accApiData && _accApiData.traders)  ? _accApiData.traders  : {};
+      const totalSessR = _combApi.total_session_realized || 0;
+
+      const totalCol = totalTotal   >= 0 ? '#4ade80' : '#f87171';
+      const realCol  = totalRealised>= 0 ? '#4ade80' : '#f87171';
+      const unrCol   = totalOpenPnl >= 0 ? '#4ade80' : '#f87171';
+      const sessRCol = totalSessR   >= 0 ? '#4ade80' : '#f87171';
+
+      const _contribCard = (key) => {
+        const meta   = _ACC[key];
+        const d      = traderTotals[key] || {};
+        const eq     = d.eq    || 0;
+        const tpnl   = d.tpnl  || 0;
+        const share  = totalEquity > 0 ? Math.max(0, Math.min(100, eq / totalEquity * 100)) : 0;
+        const tCol   = tpnl >= 0 ? '#4ade80' : '#f87171';
+        const api    = _apiT[key] || {};
+        const hasPos = api.has_position || false;
+        return `
+          <div style="background:#060d1a;border:1px solid #1e2d45;border-left:3px solid ${meta.col};border-radius:5px;padding:12px 14px;cursor:pointer"
+               onclick="_accSwitchTab('${key}')" title="Click to open ${meta.label} tab">
+            <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px">
+              <div style="width:8px;height:8px;border-radius:50%;background:${meta.col};box-shadow:0 0 5px ${meta.col}88"></div>
+              <span style="font-weight:700;color:${meta.col};font-size:11px">${meta.label}</span>
+              ${hasPos
+                ? `<span style="font-size:7px;padding:1px 6px;border-radius:8px;background:#0d2b1a;color:#4ade80;border:1px solid #166534;font-weight:700">ACTIVE</span>`
+                : `<span style="font-size:7px;color:#334155">FLAT</span>`}
+              <span style="margin-left:auto;font-size:11px;font-weight:700;font-family:monospace;color:${tCol}">${_fmtUsdSign(tpnl)}</span>
+            </div>
+            <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:4px;margin-bottom:10px">
+              ${[
+                ['Balance',  _fmtUsd(d.bal||0), '#4ade80'],
+                ['Equity',   _fmtUsd(eq),        '#60a5fa'],
+                ['Unrlzd',   _fmtUsdSign(d.opnl||0), (d.opnl||0)>=0?'#4ade80':'#f87171'],
+              ].map(([l,v,c]) => `
+                <div style="background:#040b18;border:1px solid #1a2540;border-radius:3px;padding:5px 8px">
+                  <div style="font-size:7px;color:#475569;text-transform:uppercase;letter-spacing:.06em;margin-bottom:2px">${l}</div>
+                  <div style="font-size:11px;font-weight:700;font-family:monospace;color:${c}">${v}</div>
+                </div>`).join('')}
+            </div>
+            <div>
+              <div style="display:flex;justify-content:space-between;font-size:7px;color:#334155;margin-bottom:3px">
+                <span>Equity share of total</span>
+                <span style="color:${meta.col};font-weight:700">${share.toFixed(1)}%</span>
+              </div>
+              <div style="background:#0a1020;border-radius:3px;height:6px;overflow:hidden;border:1px solid #1e2d45">
+                <div style="height:100%;width:${share}%;background:linear-gradient(90deg,${meta.col}55,${meta.col});border-radius:3px;transition:width .6s"></div>
+              </div>
+            </div>
+            <div style="margin-top:8px;font-size:8px;color:#334155;text-align:right">→ Open ${meta.label} tab</div>
+          </div>`;
+      };
+
+      return `
+        <div style="padding:14px;display:flex;flex-direction:column;gap:14px">
+
+          <!-- Section title -->
+          <div style="display:flex;align-items:center;gap:8px">
+            <div style="width:10px;height:10px;border-radius:50%;background:linear-gradient(135deg,#4ade80,#60a5fa,#f59e0b);box-shadow:0 0 8px #60a5fa55"></div>
+            <span style="font-weight:700;color:#e2e8f0;font-size:13px">Combined Account Overview</span>
+            <span style="font-size:9px;color:#475569;border:1px solid #1e2d45;padding:1px 8px;border-radius:10px;margin-left:4px">All 3 Traders · $300k total</span>
+          </div>
+
+          <!-- 6 aggregate stat cards -->
+          <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:6px">
+            ${[
+              { label:'Combined Balance',  val:totalBal,      col:'#4ade80', note:'Total cash across all 3 traders', abs:true },
+              { label:'Combined Equity',   val:totalEquity,   col:'#60a5fa', note:'Balance + current market value of open positions', abs:true },
+              { label:'Unrealized PnL',    val:totalOpenPnl,  col:unrCol,   note:'MTM gain/loss on open positions vs entry. Zero when flat.' },
+              { label:'Session Realized',  val:totalSessR,    col:sessRCol, note:'Closed-trade PnL from current active position sessions.' },
+              { label:'All-Time Realized', val:totalRealised, col:realCol,  note:'PnL from all CLOSED positions (booked profits).' },
+              { label:'Net Total PnL',     val:totalTotal,    col:totalCol, note:'Equity − $300k starting capital.' },
+            ].map(c => `
+              <div style="background:#060d1a;border:1px solid #1e2d45;border-radius:6px;padding:10px 14px" title="${c.note}">
+                <div style="font-size:8px;text-transform:uppercase;letter-spacing:.08em;color:#475569;margin-bottom:4px;font-weight:600">${c.label}</div>
+                <div style="font-size:18px;font-weight:700;font-family:monospace;color:${c.col};letter-spacing:-.5px">${c.abs ? '$'+Math.abs(c.val).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2}) : _fmtUsdSign(c.val)}</div>
+                <div style="font-size:8px;color:#1e3a5f;margin-top:3px;line-height:1.3">${c.note}</div>
+              </div>`).join('')}
+          </div>
+
+          <!-- Section divider -->
+          <div style="border-top:1px solid #1e2d45;padding-top:2px">
+            <span style="font-size:8px;font-weight:700;color:#334155;text-transform:uppercase;letter-spacing:.1em">Per-Trader Breakdown</span>
+          </div>
+
+          <!-- Contribution cards (click to open trader tab) -->
+          <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px">
+            ${['bull','bear','vol'].map(k => _contribCard(k)).join('')}
+          </div>
+
+          <!-- Comparison table -->
+          <div style="background:#060d1a;border:1px solid #1e2d45;border-radius:6px;overflow:hidden">
+            <div style="padding:8px 12px;border-bottom:1px solid #1e2d45;background:#04091a">
+              <span style="font-size:8px;font-weight:700;color:#475569;text-transform:uppercase;letter-spacing:.09em">Side-by-Side Comparison</span>
+            </div>
+            <table style="width:100%;border-collapse:collapse;font-size:9px">
+              <thead>
+                <tr style="background:#04091a">
+                  ${['Trader','Balance','Equity','Unrlzd PnL','Realized PnL','Total PnL','% Equity'].map(h =>
+                    `<th style="padding:7px 12px;color:#475569;font-weight:700;text-align:${h==='Trader'?'left':'right'};border-bottom:1px solid #1e2d45;font-size:7px;text-transform:uppercase;letter-spacing:.05em">${h}</th>`
+                  ).join('')}
+                </tr>
+              </thead>
+              <tbody>
+                ${['bull','bear','vol'].map(k => {
+                  const m  = _ACC[k];
+                  const dt = traderTotals[k] || {};
+                  const eq = dt.eq   || 0;
+                  const bl = dt.bal  || 0;
+                  const op = dt.opnl || 0;
+                  const rp = dt.rpnl || 0;
+                  const tp = dt.tpnl || 0;
+                  const sh = totalEquity > 0 ? (eq/totalEquity*100).toFixed(1)+'%' : '—';
+                  return `<tr style="border-bottom:1px solid #0d1525;cursor:pointer" onclick="_accSwitchTab('${k}')"
+                             onmouseenter="this.style.background='#080f1d'" onmouseleave="this.style.background='transparent'">
+                    <td style="padding:7px 12px;color:${m.col};font-weight:700">${m.icon} ${m.label}</td>
+                    <td style="padding:7px 12px;text-align:right;font-family:monospace;color:#94a3b8">${_fmtUsd(bl)}</td>
+                    <td style="padding:7px 12px;text-align:right;font-family:monospace;color:#60a5fa">${_fmtUsd(eq)}</td>
+                    <td style="padding:7px 12px;text-align:right;font-family:monospace;color:${op>=0?'#4ade80':'#f87171'}">${_fmtUsdSign(op)}</td>
+                    <td style="padding:7px 12px;text-align:right;font-family:monospace;color:${rp>=0?'#4ade80':'#f87171'}">${_fmtUsdSign(rp)}</td>
+                    <td style="padding:7px 12px;text-align:right;font-family:monospace;font-weight:700;color:${tp>=0?'#4ade80':'#f87171'}">${_fmtUsdSign(tp)}</td>
+                    <td style="padding:7px 12px;text-align:right;color:${m.col};font-weight:700">${sh}</td>
+                  </tr>`;
+                }).join('')}
+                <tr style="background:#04091a;border-top:2px solid #1e2d45">
+                  <td style="padding:7px 12px;color:#94a3b8;font-weight:700;font-size:8px">TOTAL</td>
+                  <td style="padding:7px 12px;text-align:right;font-family:monospace;color:#4ade80;font-weight:700">${_fmtUsd(totalBal)}</td>
+                  <td style="padding:7px 12px;text-align:right;font-family:monospace;color:#60a5fa;font-weight:700">${_fmtUsd(totalEquity)}</td>
+                  <td style="padding:7px 12px;text-align:right;font-family:monospace;font-weight:700;color:${unrCol}">${_fmtUsdSign(totalOpenPnl)}</td>
+                  <td style="padding:7px 12px;text-align:right;font-family:monospace;font-weight:700;color:${realCol}">${_fmtUsdSign(totalRealised)}</td>
+                  <td style="padding:7px 12px;text-align:right;font-family:monospace;font-weight:700;color:${totalCol}">${_fmtUsdSign(totalTotal)}</td>
+                  <td style="padding:7px 12px;text-align:right;color:#475569">100%</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>`;
     }
 
-    function _renderTraderAccount(key) {
-      const grid = el('acc-traders-grid'); if (!grid) return;
-      let card = el(`acc-card-${key}`);
-      if (!card) {
-        card = document.createElement('div');
-        card.id = `acc-card-${key}`;
-        card.style.cssText = 'background:#080f1d;border:1px solid #1a2540;border-radius:5px;display:flex;flex-direction:column;min-height:0;overflow:hidden';
-        grid.appendChild(card);
-      }
-
-      const d    = _accData[key] || {};
-      const meta = _ACC[key];
-      const bal   = d.balance        || 0;
-      const eq    = d.equity         || 0;
-      const unr   = d.unrealized_pnl || 0;   // = equity - balance (always: equity = balance + unr)
-      const opnl  = d.open_pnl       || 0;   // = opt_mtm + futures_mtm (change from cost)
-      const rpnl  = d.realized_pnl   || 0;
-      const tpnl  = d.total_pnl      || 0;
-      const spnl  = d.session_pnl    || 0;
-      const tcount = d.trade_count   || 0;
-      // Session realized PnL from executor state (closed trades this session only)
+    function _buildTraderHTML(key) {
+      const d      = _accData[key] || {};
+      const meta   = _ACC[key];
+      const bal    = d.balance        || 0;
+      const eq     = d.equity         || 0;
+      const unr    = d.unrealized_pnl || 0;
+      const opnl   = d.open_pnl       || 0;
+      const rpnl   = d.realized_pnl   || 0;
+      const tpnl   = d.total_pnl      || 0;
+      const tcount = d.trade_count    || 0;
       const accApi   = (_accApiData && _accApiData.traders) ? (_accApiData.traders[key] || {}) : {};
       const srpnl    = accApi.session_realized_pnl || 0;
       const hasPos   = accApi.has_position || false;
       const posState = accApi.state || '';
-      const balCol  = '#4ade80';
-      const unrCol  = unr  >= 0 ? '#4ade80' : '#f87171';
-      const rpnlCol = rpnl >= 0 ? '#4ade80' : '#f87171';
-      const tpnlCol = tpnl >= 0 ? '#4ade80' : '#f87171';
-      const spnlCol = spnl >= 0 ? '#4ade80' : '#f87171';
+
+      const opnlCol  = opnl >= 0 ? '#4ade80' : '#f87171';
+      const rpnlCol  = rpnl >= 0 ? '#4ade80' : '#f87171';
+      const tpnlCol  = tpnl >= 0 ? '#4ade80' : '#f87171';
       const srpnlCol = srpnl >= 0 ? '#4ade80' : '#f87171';
 
-      // Open positions
-      const openFut = Object.values(d.open_positions   || {});
-      const openOpt = Object.values(d.option_positions || {});
+      const openFut  = Object.values(d.open_positions   || {});
+      const openOpt  = Object.values(d.option_positions || {});
+      const liveTrades = (d.recent_trades || []).slice(0, 100);
+      const dbTrades   = _accTrades[key]   || [];
+      const sessions   = _accSessions[key] || [];
+      const filter     = _accFilter[key]   || 'history';
 
-      // Live in-memory trades (this server session)
-      const liveTrades  = (d.recent_trades || []).slice(0, 100);
-      // Persistent DB trades (survive restarts, exact timestamps)
-      const dbTrades    = _accTrades[key] || [];
-      // Sessions
-      const sessions    = _accSessions[key] || [];
+      return `
+        <div style="display:flex;flex-direction:column;height:100%">
 
-      const filter = _accFilter[key] || 'live';
-
-      card.innerHTML = `
-        <!-- ── Header ── -->
-        <div style="background:#050a14;border-bottom:2px solid ${meta.col};padding:6px 10px;flex-shrink:0">
-          <div style="display:flex;justify-content:space-between;align-items:center">
-            <div style="display:flex;align-items:center;gap:6px">
-              <span style="font-weight:bold;color:${meta.col};font-size:12px">${meta.icon} ${meta.label}</span>
-              <span style="font-size:8px;padding:1px 5px;border-radius:2px;background:${hasPos?'#14532d':'#1a1a2e'};color:${hasPos?'#4ade80':'#4b5563'};border:1px solid ${hasPos?'#166534':'#2d2d4e'}" title="Executor state: ${posState}">${hasPos ? '● POSITION OPEN' : '○ FLAT'}</span>
-            </div>
-            <div style="display:flex;gap:4px">
-              <button onclick="_accFilter['${key}']='live';_renderTraderAccount('${key}')"
-                style="font-size:9px;padding:1px 7px;border-radius:3px;cursor:pointer;border:1px solid ${filter==='live'?meta.col:'#374151'};background:${filter==='live'?'#0f172a':'transparent'};color:${filter==='live'?meta.col:'#6b7280'}">Live</button>
-              <button onclick="_accFilter['${key}']='history';_renderTraderAccount('${key}')"
-                style="font-size:9px;padding:1px 7px;border-radius:3px;cursor:pointer;border:1px solid ${filter==='history'?meta.col:'#374151'};background:${filter==='history'?'#0f172a':'transparent'};color:${filter==='history'?meta.col:'#6b7280'}">History</button>
-              <button onclick="_accFilter['${key}']='sessions';_renderTraderAccount('${key}')"
-                style="font-size:9px;padding:1px 7px;border-radius:3px;cursor:pointer;border:1px solid ${filter==='sessions'?meta.col:'#374151'};background:${filter==='sessions'?'#0f172a':'transparent'};color:${filter==='sessions'?meta.col:'#6b7280'}">Sessions</button>
+          <!-- ── Trader identity header ── -->
+          <div style="background:#06101e;border-bottom:2px solid ${meta.col};padding:10px 16px;flex-shrink:0">
+            <div style="display:flex;align-items:center;gap:10px">
+              <div style="width:10px;height:10px;border-radius:50%;background:${meta.col};box-shadow:0 0 8px ${meta.col}"></div>
+              <span style="font-weight:700;color:${meta.col};font-size:13px;letter-spacing:.02em">${meta.label}</span>
+              <span style="font-size:9px;padding:2px 8px;border-radius:10px;font-weight:700;
+                           background:${hasPos?'#0d2b1a':'#0c1320'};color:${hasPos?'#4ade80':'#475569'};
+                           border:1px solid ${hasPos?'#166534':'#1e3a5f'}" title="${posState}">
+                ${hasPos ? '● POSITION OPEN' : '○ FLAT'}
+              </span>
+              ${posState ? `<span style="font-size:9px;color:#334155;font-family:monospace">${posState}</span>` : ''}
+              <span style="margin-left:auto;font-size:9px;color:#334155">${dbTrades.length} trades · ${sessions.length} sessions</span>
             </div>
           </div>
-        </div>
 
-        <!-- ── Balance Row ── -->
-        <div style="display:grid;grid-template-columns:repeat(5,1fr);gap:0;border-bottom:1px solid #1a2540;flex-shrink:0">
-          ${[
-            ['Balance',          _fmtUsd(bal),        balCol,            'Cash balance after all closed trades and option premiums paid'],
-            ['Equity',           _fmtUsd(eq),         '#60a5fa',         'Balance + market value of open positions'],
-            ['Market Value',     _fmtUsd(unr),        '#93c5fd',         'Total market value of all open positions (Equity − Balance)'],
-            ['Unrealized PnL',   _fmtUsdSign(opnl),   opnl>=0?'#4ade80':'#f87171', 'Change in value of open positions from entry cost (MTM PnL)'],
-            ['Total PnL',        _fmtUsdSign(tpnl),   tpnlCol,           'Equity − $100,000 start (full picture: realized + unrealized)'],
-          ].map(([l,v,c,tip]) => `
-            <div style="padding:5px 6px;border-right:1px solid #1a2540" title="${tip}">
-              <div style="font-size:7px;color:#4b5563;text-transform:uppercase;letter-spacing:.06em">${l}</div>
-              <div style="font-size:10px;font-weight:bold;font-family:monospace;color:${c}">${v}</div>
-            </div>`).join('')}
-        </div>
-        <!-- Realized PnL + Session Realized PnL row -->
-        <div style="display:flex;align-items:center;gap:16px;border-bottom:1px solid #1a2540;flex-shrink:0;padding:3px 8px;background:#040810">
-          <div style="display:flex;align-items:center;gap:4px">
-            <span style="font-size:8px;color:#4b5563">Realized PnL:&nbsp;</span>
-            <span style="font-size:9px;font-weight:bold;font-family:monospace;color:${rpnlCol}" title="Sum of PnL from all CLOSED positions (sold options + closed futures). Does NOT include option premiums paid for still-open positions.">${_fmtUsdSign(rpnl)}</span>
-            <span style="font-size:8px;color:#1e3a5f;margin-left:4px">from ${tcount} trade(s)</span>
+          <!-- ── 6-column stat bar ── -->
+          <div style="display:grid;grid-template-columns:repeat(6,1fr);border-bottom:1px solid #1a2540;flex-shrink:0">
+            ${[
+              ['Balance',       _fmtUsd(bal),         '#4ade80',  'Cash balance after premiums & closed PnL'],
+              ['Equity',        _fmtUsd(eq),           '#60a5fa',  'Balance + current market value of open positions'],
+              ['Mkt Value',     _fmtUsd(unr),          '#93c5fd',  'Absolute market value of open positions (Equity − Balance). NOT the PnL.'],
+              ['Unrealized PnL',_fmtUsdSign(opnl),     opnlCol,    'MTM profit/loss on open positions vs entry. Zero when flat.'],
+              ['Realized PnL',  _fmtUsdSign(rpnl),     rpnlCol,    'PnL from all CLOSED trades (booked gains/losses).'],
+              ['Total PnL',     _fmtUsdSign(tpnl),     tpnlCol,    'Equity − $100k start (realized + unrealized).'],
+            ].map(([l,v,c,tip]) => `
+              <div style="padding:8px 10px;border-right:1px solid #1a2540;background:#040d1a" title="${tip}">
+                <div style="font-size:7px;color:#475569;text-transform:uppercase;letter-spacing:.06em;margin-bottom:3px">${l}</div>
+                <div style="font-size:12px;font-weight:700;font-family:monospace;color:${c}">${v}</div>
+              </div>`).join('')}
           </div>
-          <div style="display:flex;align-items:center;gap:4px;border-left:1px solid #1a2540;padding-left:16px">
-            <span style="font-size:8px;color:#4b5563" title="PnL from trades CLOSED in the current active position session (futures + hedge). Resets when a new position is entered.">Session Realized:&nbsp;</span>
-            <span style="font-size:9px;font-weight:bold;font-family:monospace;color:${srpnlCol}">${Object.keys(accApi).length === 0 ? '—' : _fmtUsdSign(srpnl)}</span>
+
+          <!-- ── Session realized row ── -->
+          <div style="display:flex;align-items:center;gap:0;border-bottom:1px solid #1a2540;flex-shrink:0;background:#050e1c">
+            <div style="display:flex;align-items:center;gap:6px;padding:5px 12px;border-right:1px solid #1a2540">
+              <span style="font-size:8px;color:#475569">Session Realized:</span>
+              <span style="font-size:10px;font-weight:700;font-family:monospace;color:${srpnlCol}">${Object.keys(accApi).length===0?'—':_fmtUsdSign(srpnl)}</span>
+            </div>
+            <div style="display:flex;align-items:center;gap:6px;padding:5px 12px;border-right:1px solid #1a2540">
+              <span style="font-size:8px;color:#475569">All-time trades:</span>
+              <span style="font-size:10px;font-weight:700;color:#94a3b8">${tcount}</span>
+            </div>
+            <div style="display:flex;align-items:center;gap:6px;padding:5px 12px">
+              <span style="font-size:8px;color:#475569">DB records:</span>
+              <span style="font-size:10px;font-weight:700;color:#94a3b8">${dbTrades.length}</span>
+            </div>
           </div>
-        </div>
 
-        <!-- ── Open Positions ── -->
-        ${openFut.length || openOpt.length ? `
-        <div style="padding:5px 8px;border-bottom:1px solid #1a2540;flex-shrink:0;font-size:10px">
-          <div style="font-size:8px;color:#4b5563;text-transform:uppercase;letter-spacing:.06em;margin-bottom:3px">Open Positions</div>
-          ${openFut.map(p => `
-            <div style="display:flex;justify-content:space-between;padding:1px 0">
-              <span style="color:${p.side==='BUY'?'#4ade80':'#f87171'}">${p.side} ${p.qty} BTC</span>
-              <span style="color:#9ca3af;font-family:monospace">@ ${_fmtUsd(p.avg_price)}</span>
-            </div>`).join('')}
-          ${openOpt.map(p => `
-            <div style="display:flex;justify-content:space-between;padding:1px 0">
-              <span style="color:#22d3ee">LONG OPT ${p.qty}</span>
-              <span style="color:#9ca3af;font-family:monospace">${p.symbol} @ ${_fmtUsd(p.avg_price)}</span>
-            </div>`).join('')}
-        </div>` : ''}
+          ${openFut.length || openOpt.length ? `
+          <!-- ── Open positions ── -->
+          <div style="padding:8px 12px;border-bottom:1px solid #1a2540;flex-shrink:0;background:#060f1e">
+            <div style="font-size:8px;color:#475569;text-transform:uppercase;letter-spacing:.07em;margin-bottom:5px;font-weight:700">Open Positions</div>
+            <div style="display:flex;flex-wrap:wrap;gap:8px">
+              ${openFut.map(p => `
+                <div style="background:#0a1628;border:1px solid ${p.side==='BUY'?'#166534':'#7f1d1d'};border-radius:5px;padding:5px 12px;display:flex;align-items:center;gap:10px">
+                  <span style="font-size:9px;font-weight:700;color:${p.side==='BUY'?'#4ade80':'#f87171'}">${p.side}</span>
+                  <span style="font-size:9px;color:#94a3b8">${p.qty} BTC futures</span>
+                  <span style="font-size:9px;font-family:monospace;color:#64748b">@ ${_fmtUsd(p.avg_price)}</span>
+                </div>`).join('')}
+              ${openOpt.map(p => `
+                <div style="background:#0a1628;border:1px solid #1e3a5f;border-radius:5px;padding:5px 12px;display:flex;align-items:center;gap:10px">
+                  <span style="font-size:9px;font-weight:700;color:#22d3ee">LONG OPT ${p.qty}</span>
+                  <span style="font-size:9px;font-family:monospace;color:#64748b">${p.symbol}</span>
+                  <span style="font-size:9px;font-family:monospace;color:#94a3b8">@ ${_fmtUsd(p.avg_price)}</span>
+                </div>`).join('')}
+            </div>
+          </div>` : ''}
 
-        <!-- ── Trade Count badge ── -->
-        <div style="padding:3px 8px;border-bottom:1px solid #0d1525;flex-shrink:0;display:flex;gap:12px;font-size:9px;color:#4b5563">
-          <span>Total trades (session): <b style="color:#9ca3af">${tcount}</b></span>
-          <span>DB records: <b style="color:#9ca3af">${dbTrades.length}</b></span>
-          <span>Sessions: <b style="color:#9ca3af">${sessions.length}</b></span>
-        </div>
+          <!-- ── View selector tab bar ── -->
+          <div style="display:flex;align-items:center;border-bottom:1px solid #1a2540;flex-shrink:0;background:#06101e">
+            ${[
+              ['live',     'Live Trades'],
+              ['history',  'Full History'],
+              ['sessions', key==='vol'?'Event Log':'Session Log'],
+            ].map(([f,l]) => `
+              <button onclick="_accFilter['${key}']='${f}';_renderAccContent()"
+                style="padding:8px 18px;background:transparent;border:none;border-bottom:2px solid ${filter===f?meta.col:'transparent'};
+                       color:${filter===f?meta.col:'#475569'};font-size:10px;font-weight:${filter===f?'700':'500'};
+                       cursor:pointer;letter-spacing:.02em;transition:color .15s">${l}</button>`).join('')}
+          </div>
 
-        <!-- ── Content Area (scrollable, view-switched) ── -->
-        <div style="flex:1;min-height:0;overflow-y:auto">
-          ${filter === 'live'     ? _buildLiveTradeLog(liveTrades, meta.col) : ''}
-          ${filter === 'history'  ? _buildDbTradeLog(dbTrades, meta.col)    : ''}
-          ${filter === 'sessions' ? _buildSessionLog(sessions, meta.col)    : ''}
+          <!-- ── Trade/session content (scrollable) ── -->
+          <div style="flex:1;min-height:0;overflow-y:auto">
+            ${filter==='live'     ? _buildLiveTradeLog(liveTrades, meta.col) : ''}
+            ${filter==='history'  ? _buildDbTradeLog(dbTrades, meta.col)    : ''}
+            ${filter==='sessions' ? (key==='vol' ? _buildVolEventLog(sessions, meta.col) : _buildSessionLog(sessions, meta.col)) : ''}
+          </div>
         </div>`;
     }
 
@@ -6218,37 +7678,200 @@ async function _updateSessionBanner() {
         </table>`;
     }
 
-    function _buildSessionLog(sessions, col) {
-      if (!sessions.length) return '<div style="color:#374151;padding:12px;font-size:10px;text-align:center">No completed sessions found.</div>';
+    // Format a date string like "2026-06-07" to "07-Jun-26"
+    function _fmtSessionDate(d) {
+      if (!d) return '—';
+      try {
+        const dt = new Date(d + 'T00:00:00');
+        return dt.toLocaleDateString('en-GB', { day:'2-digit', month:'short', year:'2-digit' });
+      } catch(e) { return d; }
+    }
+    // Extract just the time from "2026-06-07 21:55:00 IST" → "21:55"
+    function _fmtSessionTime(ts) {
+      if (!ts) return '—';
+      const m = ts.match(/(\d{2}:\d{2})/);
+      return m ? m[1] : ts.slice(11,16) || '—';
+    }
+    // Build a human-readable session name: "Session 07-Jun-26 04:00 → 08-Jun-26 13:30"
+    function _sessionName(s) {
+      const startDate = _fmtSessionDate(s.session_date);
+      const entryTime = _fmtSessionTime(s.entry_ts_ist);
+      if (!s.close_ts_ist) {
+        return `Session ${startDate} ${entryTime} IST — OPEN`;
+      }
+      // Extract close date from close_ts_ist if it's a different day
+      const closeRaw = s.close_ts_ist || '';
+      const closeDateRaw = closeRaw.slice(0,10);  // "YYYY-MM-DD"
+      const closeDate = _fmtSessionDate(closeDateRaw);
+      const closeTime = _fmtSessionTime(closeRaw);
+      const sameDay = closeDateRaw === s.session_date;
+      return `Session ${startDate} ${entryTime} → ${sameDay ? '' : closeDate + ' '}${closeTime} IST`;
+    }
+
+    // ── Volatile Trader: Event-based session log ──────────────────────────────
+    function _buildVolEventLog(sessions, col) {
+      if (!sessions.length) return '<div style="color:#475569;padding:16px;font-size:10px;text-align:center">No event sessions found. Sessions are saved when a macro event trade is executed.</div>';
+
+      // Build event lookup map: event_id → event record
+      // Session IDs for volatile are "vol_{evt_id}"
+      const _evtMap = {};
+      (_volEvents || []).forEach(e => { _evtMap[e.id] = e; });
+
+      // Resolve event name from session_id → extract evt_id → lookup in _evtMap
+      function _evtName(s) {
+        const sid = s.session_id || '';
+        // Format: "vol_{evt_id}" or "vol_{evt_id}_IST"
+        const match = sid.match(/^vol_([a-f0-9\-]{8,})/)
+        if (match) {
+          const evt = _evtMap[match[1]];
+          if (evt && evt.name) return evt.name;
+        }
+        // Fallback: try entry_zone field
+        if (s.entry_zone) return s.entry_zone;
+        // Last fallback: derive from session_id
+        return sid.replace(/^vol_/, '').replace(/_/g, ' ').slice(0, 30) || 'Unknown Event';
+      }
+
+      // Stats
+      const totalPnl = sessions.reduce((a,r) => a + (r.total_pnl||0), 0);
+      const wins     = sessions.filter(r => r.total_pnl > 0).length;
+      const losses   = sessions.filter(r => r.total_pnl < 0).length;
+      const wr       = sessions.length ? Math.round(wins/sessions.length*100) : 0;
+      const netCol   = totalPnl >= 0 ? '#4ade80' : '#f87171';
+
       return `
-        <table style="width:100%;border-collapse:collapse;font-size:10px">
+        <!-- Event stats summary -->
+        <div style="display:grid;grid-template-columns:repeat(4,1fr);border-bottom:1px solid #1a2540;background:#050c18">
+          ${[
+            ['Total Events', sessions.length, '#94a3b8'],
+            ['Profitable',   wins,            '#4ade80'],
+            ['Loss Events',  losses,          '#f87171'],
+            ['Win Rate',     wr+'%',          wr>=50?'#4ade80':'#f87171'],
+          ].map(([l,v,c]) => `
+            <div style="padding:6px 10px;border-right:1px solid #1a2540;text-align:center">
+              <div style="font-size:7px;color:#475569;text-transform:uppercase;letter-spacing:.07em;margin-bottom:1px">${l}</div>
+              <div style="font-size:12px;font-weight:700;font-family:monospace;color:${c}">${v}</div>
+            </div>`).join('')}
+        </div>
+
+        <!-- Event sessions table -->
+        <table style="width:100%;border-collapse:collapse;font-size:9px">
           <thead>
-            <tr style="background:#0a0f1e;position:sticky;top:0">
-              <th style="text-align:left;padding:4px 6px;color:#4b5563;font-weight:normal;border-bottom:1px solid #1a2540">Date</th>
-              <th style="text-align:left;padding:4px 6px;color:#4b5563;font-weight:normal;border-bottom:1px solid #1a2540">Entry Time IST</th>
-              <th style="text-align:left;padding:4px 6px;color:#4b5563;font-weight:normal;border-bottom:1px solid #1a2540">Close Time IST</th>
-              <th style="text-align:right;padding:4px 6px;color:#4b5563;font-weight:normal;border-bottom:1px solid #1a2540">Entry Price</th>
-              <th style="text-align:left;padding:4px 6px;color:#4b5563;font-weight:normal;border-bottom:1px solid #1a2540">Zone</th>
-              <th style="text-align:right;padding:4px 6px;color:#4b5563;font-weight:normal;border-bottom:1px solid #1a2540">PnL</th>
-              <th style="text-align:left;padding:4px 6px;color:#4b5563;font-weight:normal;border-bottom:1px solid #1a2540">Status</th>
+            <tr style="background:#060e1c;position:sticky;top:0">
+              <th style="text-align:left;padding:5px 10px;color:#475569;font-weight:700;border-bottom:1px solid #1a2540;font-size:7px;letter-spacing:.05em;text-transform:uppercase">Event</th>
+              <th style="text-align:left;padding:5px 8px;color:#475569;font-weight:700;border-bottom:1px solid #1a2540;font-size:7px;letter-spacing:.05em;text-transform:uppercase">Trade Time IST</th>
+              <th style="text-align:left;padding:5px 8px;color:#475569;font-weight:700;border-bottom:1px solid #1a2540;font-size:7px;letter-spacing:.05em;text-transform:uppercase">Close Time IST</th>
+              <th style="text-align:right;padding:5px 8px;color:#475569;font-weight:700;border-bottom:1px solid #1a2540;font-size:7px;letter-spacing:.05em;text-transform:uppercase">Total PnL</th>
+              <th style="text-align:center;padding:5px 8px;color:#475569;font-weight:700;border-bottom:1px solid #1a2540;font-size:7px;letter-spacing:.05em;text-transform:uppercase">Outcome</th>
             </tr>
           </thead>
           <tbody>
             ${sessions.map(s => {
-              const pnl = s.total_pnl || 0;
-              const pnlCol = pnl > 0 ? '#4ade80' : pnl < 0 ? '#f87171' : '#6b7280';
-              const statCol = s.status === 'open' ? '#f59e0b' : '#4ade80';
-              return `<tr style="border-bottom:1px solid #0d1525">
-                <td style="padding:3px 6px;color:#9ca3af;font-family:monospace">${s.session_date || '—'}</td>
-                <td style="padding:3px 6px;color:#9ca3af;font-family:monospace;font-size:9px">${s.entry_ts_ist || '—'}</td>
-                <td style="padding:3px 6px;color:#9ca3af;font-family:monospace;font-size:9px">${s.close_ts_ist || '—'}</td>
-                <td style="padding:3px 6px;text-align:right;font-family:monospace">${s.entry_price ? '$'+Number(s.entry_price).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2}) : '—'}</td>
-                <td style="padding:3px 6px;color:#6b7280;font-size:9px">${s.entry_zone || '—'}</td>
-                <td style="padding:3px 6px;text-align:right;font-family:monospace;color:${pnlCol};font-weight:bold">${pnl===0?'—':(pnl>0?'+':'')+pnl.toFixed(2)}</td>
-                <td style="padding:3px 6px"><span style="background:#0a0f1e;color:${statCol};padding:1px 5px;border-radius:2px;font-size:8px">${(s.status||'').toUpperCase()}</span></td>
+              const evtName = _evtName(s);
+              const pnl     = s.total_pnl || 0;
+              const pnlCol  = pnl > 0 ? '#4ade80' : pnl < 0 ? '#f87171' : '#6b7280';
+              const isOpen  = s.status === 'open';
+              const statBg  = isOpen ? '#1a1f00' : pnl > 0 ? '#052e16' : pnl < 0 ? '#1c0a0a' : '#0a0f1e';
+              const statCol = isOpen ? '#f59e0b' : pnl > 0 ? '#4ade80' : '#f87171';
+              const evtDate = _fmtSessionDate(s.session_date);
+              return `<tr style="border-bottom:1px solid #0d1525;transition:background .15s" onmouseenter="this.style.background='#080f1d'" onmouseleave="this.style.background='transparent'">
+                <td style="padding:6px 10px">
+                  <div style="font-size:9px;font-weight:700;color:${col}">${evtName}</div>
+                  <div style="font-size:7px;color:#334155;margin-top:1px;font-family:monospace">${evtDate} · ID: ${(s.session_id||'').slice(0,20)}</div>
+                </td>
+                <td style="padding:6px 8px;font-family:monospace;color:#94a3b8;font-size:8px;white-space:nowrap">${s.entry_ts_ist ? s.entry_ts_ist.slice(11,16)+' IST' : '—'}</td>
+                <td style="padding:6px 8px;font-family:monospace;color:#64748b;font-size:8px;white-space:nowrap">${s.close_ts_ist ? s.close_ts_ist.slice(11,16)+' IST' : isOpen?'<span style="color:#f59e0b">OPEN</span>':'—'}</td>
+                <td style="padding:6px 8px;text-align:right;font-family:monospace;font-size:11px;font-weight:700;color:${pnlCol}">${pnl===0?'—':(pnl>0?'+':'')+pnl.toFixed(2)}</td>
+                <td style="padding:6px 8px;text-align:center">
+                  <span style="background:${statBg};color:${statCol};padding:2px 8px;border-radius:10px;font-size:7px;font-weight:700;border:1px solid ${statCol}33">
+                    ${isOpen ? 'IN TRADE' : pnl > 0 ? 'PROFIT' : pnl < 0 ? 'LOSS' : 'FLAT'}
+                  </span>
+                </td>
               </tr>`;
             }).join('')}
           </tbody>
+          <tfoot>
+            <tr style="background:#060e1c;border-top:2px solid #1a2540">
+              <td colspan="3" style="padding:5px 10px;font-size:8px;font-weight:700;color:#475569">NET PnL (${sessions.length} events traded)</td>
+              <td style="padding:5px 8px;text-align:right;font-family:monospace;font-size:11px;font-weight:700;color:${netCol}">${totalPnl===0?'$0.00':(totalPnl>0?'+':'')+totalPnl.toFixed(2)}</td>
+              <td></td>
+            </tr>
+          </tfoot>
+        </table>`;
+    }
+
+    function _buildSessionLog(sessions, col) {
+      if (!sessions.length) return '<div style="color:#475569;padding:16px;font-size:10px;text-align:center">No completed sessions found in the database.</div>';
+
+      // Summary across all sessions
+      const totalPnl = sessions.reduce((s,r) => s + (r.total_pnl||0), 0);
+      const wins     = sessions.filter(r => r.total_pnl > 0).length;
+      const losses   = sessions.filter(r => r.total_pnl < 0).length;
+      const wr       = sessions.length ? Math.round(wins/sessions.length*100) : 0;
+      const netCol   = totalPnl >= 0 ? '#4ade80' : '#f87171';
+
+      return `
+        <!-- Session summary stats -->
+        <div style="display:grid;grid-template-columns:repeat(4,1fr);border-bottom:1px solid #1a2540;background:#050c18">
+          ${[
+            ['Total Sessions', sessions.length, '#94a3b8'],
+            ['Wins',           wins,             '#4ade80'],
+            ['Losses',         losses,           '#f87171'],
+            ['Win Rate',       wr+'%',           wr>=50?'#4ade80':'#f87171'],
+          ].map(([l,v,c]) => `
+            <div style="padding:6px 10px;border-right:1px solid #1a2540;text-align:center">
+              <div style="font-size:7px;color:#475569;text-transform:uppercase;letter-spacing:.07em;margin-bottom:1px">${l}</div>
+              <div style="font-size:12px;font-weight:700;font-family:monospace;color:${c}">${v}</div>
+            </div>`).join('')}
+        </div>
+        <!-- Sessions table -->
+        <table style="width:100%;border-collapse:collapse;font-size:10px">
+          <thead>
+            <tr style="background:#060e1c;position:sticky;top:0">
+              <th style="text-align:left;padding:5px 10px;color:#475569;font-weight:600;border-bottom:1px solid #1a2540;font-size:8px;letter-spacing:.05em;text-transform:uppercase">Session Name</th>
+              <th style="text-align:right;padding:5px 8px;color:#475569;font-weight:600;border-bottom:1px solid #1a2540;font-size:8px;letter-spacing:.05em;text-transform:uppercase">Entry Price</th>
+              <th style="text-align:left;padding:5px 8px;color:#475569;font-weight:600;border-bottom:1px solid #1a2540;font-size:8px;letter-spacing:.05em;text-transform:uppercase">Zone</th>
+              <th style="text-align:right;padding:5px 8px;color:#475569;font-weight:600;border-bottom:1px solid #1a2540;font-size:8px;letter-spacing:.05em;text-transform:uppercase">Fut PnL</th>
+              <th style="text-align:right;padding:5px 8px;color:#475569;font-weight:600;border-bottom:1px solid #1a2540;font-size:8px;letter-spacing:.05em;text-transform:uppercase">Hedge PnL</th>
+              <th style="text-align:right;padding:5px 8px;color:#475569;font-weight:600;border-bottom:1px solid #1a2540;font-size:8px;letter-spacing:.05em;text-transform:uppercase">Total PnL</th>
+              <th style="text-align:center;padding:5px 8px;color:#475569;font-weight:600;border-bottom:1px solid #1a2540;font-size:8px;letter-spacing:.05em;text-transform:uppercase">Status</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${sessions.map((s,idx) => {
+              const pnl     = s.total_pnl  || 0;
+              const futPnl  = s.futures_pnl || 0;
+              const hedgePnl= s.hedge_pnl  || 0;
+              const pnlCol  = pnl > 0 ? '#4ade80' : pnl < 0 ? '#f87171' : '#6b7280';
+              const fPnlCol = futPnl > 0 ? '#4ade80' : futPnl < 0 ? '#f87171' : '#6b7280';
+              const hPnlCol = hedgePnl > 0 ? '#4ade80' : hedgePnl < 0 ? '#f87171' : '#6b7280';
+              const isOpen  = s.status === 'open';
+              const statBg  = isOpen ? '#1a1f00' : pnl > 0 ? '#052e16' : pnl < 0 ? '#1c0a0a' : '#0a0f1e';
+              const statCol = isOpen ? '#f59e0b' : pnl > 0 ? '#4ade80' : '#f87171';
+              const sName   = _sessionName(s);
+              return `<tr style="border-bottom:1px solid #0d1525;transition:background .15s" onmouseenter="this.style.background='#080f1d'" onmouseleave="this.style.background='transparent'">
+                <td style="padding:5px 10px">
+                  <div style="font-size:9px;font-weight:600;color:${col};font-family:monospace">${sName}</div>
+                  <div style="font-size:8px;color:#334155;margin-top:1px">ID: ${(s.session_id||'').slice(0,28)}</div>
+                </td>
+                <td style="padding:5px 8px;text-align:right;font-family:monospace;font-size:10px;color:#94a3b8">${s.entry_price ? '$'+Number(s.entry_price).toLocaleString('en-US',{minimumFractionDigits:0,maximumFractionDigits:0}) : '—'}</td>
+                <td style="padding:5px 8px;color:#64748b;font-size:9px">${s.entry_zone || '—'}</td>
+                <td style="padding:5px 8px;text-align:right;font-family:monospace;font-size:10px;color:${fPnlCol}">${futPnl===0?'—':(futPnl>0?'+':'')+futPnl.toFixed(2)}</td>
+                <td style="padding:5px 8px;text-align:right;font-family:monospace;font-size:10px;color:${hPnlCol}">${hedgePnl===0?'—':(hedgePnl>0?'+':'')+hedgePnl.toFixed(2)}</td>
+                <td style="padding:5px 8px;text-align:right;font-family:monospace;font-size:11px;font-weight:700;color:${pnlCol}">${pnl===0?'—':(pnl>0?'+':'')+pnl.toFixed(2)}</td>
+                <td style="padding:5px 8px;text-align:center">
+                  <span style="background:${statBg};color:${statCol};padding:2px 7px;border-radius:10px;font-size:8px;font-weight:600;border:1px solid ${statCol}33">${isOpen ? 'OPEN' : (pnl>0?'PROFIT':'LOSS')}</span>
+                </td>
+              </tr>`;
+            }).join('')}
+          </tbody>
+          <tfoot>
+            <tr style="background:#060e1c;border-top:2px solid #1a2540">
+              <td colspan="5" style="padding:5px 10px;font-size:9px;font-weight:700;color:#475569">NET SESSION PnL (${sessions.length} sessions)</td>
+              <td style="padding:5px 8px;text-align:right;font-family:monospace;font-size:11px;font-weight:700;color:${netCol}">${totalPnl===0?'$0.00':(totalPnl>0?'+':'')+totalPnl.toFixed(2)}</td>
+              <td></td>
+            </tr>
+          </tfoot>
         </table>`;
     }
 
@@ -6530,9 +8153,13 @@ Cash Balance = $100k - premiums paid + option sale proceeds + realized futures P
 
     // ══════════════════════════════════════════════════════ ORDER BLOCKS TAB
     let _obChart = null, _obCandles = null, _obPriceLines = [];
+    let _obZoneSeries = [];    // BaselineSeries instances for zone rectangles
     let _obCurrentTF = '15m', _obData = null, _obLoading = false;
     let _obLastCandle = null, _obLastCandleFinal = false;
     let _obChartInitialized = false;
+
+    const _TF_SEC = {'1m':60,'3m':180,'5m':300,'15m':900,'30m':1800,'1h':3600,'4h':14400,'1d':86400,'1w':604800};
+    const _obTFSec = () => _TF_SEC[_obCurrentTF] || 300;
 
     const _OB_GRADE_COL = { 'A+': '#a78bfa', 'A': '#60a5fa', 'B': '#4ade80' };
 
@@ -6618,24 +8245,63 @@ Cash Balance = $100k - premiums paid + option sale proceeds + realized futures P
     }
 
     function _overlayZones(zones) {
-      // Clear old price lines
+      // Remove old zone series (rectangles)
+      _obZoneSeries.forEach(s => { try { _obChart.removeSeries(s); } catch(e) {} });
+      _obZoneSeries = [];
+      // Remove old price lines (legacy cleanup)
       _obPriceLines.forEach(pl => { try { _obCandles.removePriceLine(pl); } catch(e) {} });
       _obPriceLines = [];
-      if (!_obCandles || !zones) return;
+
+      if (!_obChart || !_obCandles || !zones || !zones.length) return;
+
+      const tfSec = _obTFSec();
+      // Right edge: extend 2 bars beyond the latest closed candle so the rectangle
+      // visually reaches the right edge of the chart for active zones.
+      const nowSec = Math.floor(Date.now() / 1000) + IST_OFF;
+      const rightEdge = nowSec + 2 * tfSec;
+
       zones.forEach(z => {
-        const col = z.is_demand ? '#22c55e' : '#f43f5e';
-        const topLine = _obCandles.createPriceLine({
-          price: z.top, color: col, lineWidth: 1,
-          lineStyle: LightweightCharts.LineStyle.Solid,
-          axisLabelVisible: true,
-          title: (z.is_demand ? 'D' : 'S') + ' ' + z.grade,
-        });
-        const botLine = _obCandles.createPriceLine({
-          price: z.bottom, color: col, lineWidth: 1,
-          lineStyle: LightweightCharts.LineStyle.Dashed,
-          axisLabelVisible: false, title: '',
-        });
-        _obPriceLines.push(topLine, botLine);
+        if (!z.born_ts) return;
+        const col     = z.is_demand ? '#22c55e' : '#f43f5e';
+        const fill1   = z.is_demand ? 'rgba(34,197,94,0.18)' : 'rgba(244,63,94,0.18)';
+        const fill2   = z.is_demand ? 'rgba(34,197,94,0.06)' : 'rgba(244,63,94,0.06)';
+
+        // born_ts is epoch ms — convert to chart time (seconds + IST offset)
+        const bornSec = Math.floor(z.born_ts / 1000) + IST_OFF;
+
+        // BaselineSeries: data value = zone.top, base = zone.bottom.
+        // Fills between zone.top and zone.bottom across born → rightEdge.
+        try {
+          const s = _obChart.addBaselineSeries({
+            baseValue:        { type: 'price', price: z.bottom },
+            topFillColor1:    fill1,
+            topFillColor2:    fill2,
+            topLineColor:     col,
+            topLineWidth:     1,
+            bottomFillColor1: 'rgba(0,0,0,0)',
+            bottomFillColor2: 'rgba(0,0,0,0)',
+            bottomLineColor:  col,
+            bottomLineWidth:  1,
+            lineWidth:        1,
+            priceLineVisible:    false,
+            lastValueVisible:    false,
+            crosshairMarkerVisible: false,
+          });
+          s.setData([
+            { time: bornSec,    value: z.top },
+            { time: rightEdge,  value: z.top },
+          ]);
+          // Grade label at zone mid on the right axis
+          s.createPriceLine({
+            price:             z.mid || ((z.top + z.bottom) / 2),
+            color:             col,
+            lineWidth:         0,
+            lineStyle:         LightweightCharts.LineStyle.Solid,
+            axisLabelVisible:  true,
+            title:             (z.is_demand ? 'D ' : 'S ') + (z.grade || ''),
+          });
+          _obZoneSeries.push(s);
+        } catch(e) { console.warn('OB zone series error:', e); }
       });
     }
 
@@ -6648,7 +8314,11 @@ Cash Balance = $100k - premiums paid + option sale proceeds + realized futures P
       const supply   = d.supply  || [];
       const stats    = d.stats   || {};
       const cp       = d.current_price || 0;
-      const allZones = [...demand.slice(0,1), ...supply.slice(0,1)];
+      // Chart: show only nearest 1 demand + 1 supply as rectangles
+      const allZones = [
+        ...(demand.length ? [demand[0]] : []),
+        ...(supply.length ? [supply[0]] : []),
+      ];
 
       if (!el('ob-chart')) return;
 
@@ -6706,40 +8376,101 @@ Cash Balance = $100k - premiums paid + option sale proceeds + realized futures P
         }).catch(() => {});
       }
 
-      // ── Zones table ────────────────────────────────────────────────────
+      // ── Nearest 1 demand + 1 supply — full detail cards ────────────────
       const tbl = el('ob-table');
       if (!tbl) return;
-      if (!allZones.length) {
-        tbl.innerHTML = '<div style="color:#4b5563;font-size:10px;text-align:center;padding:12px">No active zones detected — try Aggressive sensitivity or smaller pivot length.</div>';
+
+      const nearDemand = demand[0] || null;
+      const nearSupply = supply[0] || null;
+
+      if (!nearDemand && !nearSupply) {
+        tbl.innerHTML = '<div style="color:#4b5563;font-size:10px;text-align:center;padding:12px">No active zones detected on ' + _obCurrentTF + ' TF — try Aggressive sensitivity or a smaller pivot length.</div>';
         return;
       }
-      const sortedZones = [...allZones].sort((a, b) => a.distance_pct - b.distance_pct);
-      let html = '<table style="width:100%;border-collapse:collapse;font-size:10px;font-family:monospace">' +
-        '<thead><tr style="color:#6b7280;border-bottom:1px solid #1f2937">' +
-        '<th style="text-align:left;padding:3px 6px">Type</th>' +
-        '<th style="text-align:right;padding:3px 6px">Zone Range</th>' +
-        '<th style="text-align:center;padding:3px 6px">Grade</th>' +
-        '<th style="text-align:right;padding:3px 6px">Score</th>' +
-        '<th style="text-align:right;padding:3px 6px">Distance</th>' +
-        '<th style="text-align:right;padding:3px 6px">Age (bars)</th>' +
-        '</tr></thead><tbody>';
-      sortedZones.forEach(z => {
-        const col = z.is_demand ? '#22c55e' : '#f43f5e';
-        const gc2 = _OB_GRADE_COL[z.grade] || '#6b7280';
-        const dir = z.above_price ? '▲ above' : '▼ below';
-        const dirCol = z.above_price ? '#f43f5e' : '#22c55e';
-        html +=
-          '<tr style="border-bottom:1px solid #111827;background:' + (z.is_demand ? 'rgba(34,197,94,.04)' : 'rgba(244,63,94,.04)') + '">' +
-          '<td style="padding:4px 6px;color:' + col + ';font-weight:bold">' + (z.is_demand ? '🟢 DEMAND' : '🔴 SUPPLY') + '</td>' +
-          '<td style="padding:4px 6px;text-align:right;color:#e2e8f0">$' + fmt(z.bottom) + ' — $' + fmt(z.top) + '</td>' +
-          '<td style="padding:4px 6px;text-align:center;font-weight:bold;color:' + gc2 + '">' + z.grade + '</td>' +
-          '<td style="padding:4px 6px;text-align:right;color:#94a3b8">' + z.score.toFixed(1) + '</td>' +
-          '<td style="padding:4px 6px;text-align:right;color:' + dirCol + '">' + z.distance_pct.toFixed(2) + '% ' + dir + '</td>' +
-          '<td style="padding:4px 6px;text-align:right;color:#6b7280">' + z.age_bars + '</td>' +
-          '</tr>';
-      });
-      html += '</tbody></table>';
-      tbl.innerHTML = html;
+
+      // Cross-reference: which zone does each trader have locked?
+      const _bullMid = (S.bull||{}).locked_high_line;
+      const _bearMid = (S.bear||{}).locked_high_line;
+
+      const _shortTs = ist => {
+        if (!ist || ist === '—') return '—';
+        return ist.replace(/^\d{4}-/, '');  // "MM-DD HH:MM"
+      };
+
+      const _zoneCard = (z, isNearest) => {
+        if (!z) return '';
+        const col   = z.is_demand ? '#22c55e' : '#f43f5e';
+        const gc2   = _OB_GRADE_COL[z.grade] || '#6b7280';
+        const dir   = z.above_price ? '▲ above price' : '▼ below price';
+        const dirCol= z.above_price ? '#f43f5e' : '#22c55e';
+        const mid   = z.mid || ((z.top + z.bottom) / 2);
+        const bullLocked = _bullMid && Math.abs(mid - _bullMid) < 2 && z.is_demand;
+        const bearLocked = _bearMid && Math.abs(mid - _bearMid) < 2 && !z.is_demand;
+        const barsLeft   = z.bars_remaining ?? '—';
+        const barsCol    = typeof barsLeft === 'number'
+          ? (barsLeft < 20 ? '#ef4444' : barsLeft < 50 ? '#f59e0b' : '#6b7280') : '#6b7280';
+
+        return `<div style="border:1px solid ${col}33;border-left:3px solid ${col};border-radius:4px;padding:8px 10px;margin:4px 0;background:${z.is_demand?'rgba(34,197,94,.04)':'rgba(244,63,94,.04)'}">
+          <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:6px">
+            <span style="color:${col};font-weight:bold;font-size:11px">${z.is_demand?'🟢 DEMAND':'🔴 SUPPLY'} ${isNearest?'<span style="font-size:8px;color:#6b7280">(nearest)</span>':''}</span>
+            <span style="color:${gc2};font-weight:bold;font-size:13px">${z.grade} <span style="color:#4b5563;font-size:9px;font-weight:normal">${(z.score||0).toFixed(1)}</span></span>
+          </div>
+          <div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:6px;font-size:9px">
+            <div><div style="color:#374151">Zone</div><div style="color:#e2e8f0;font-family:monospace">$${fmt(z.bottom,0)}–$${fmt(z.top,0)}</div></div>
+            <div><div style="color:#374151">Mid</div><div style="color:#f59e0b;font-weight:bold;font-family:monospace">$${fmt(mid,0)}</div></div>
+            <div><div style="color:#374151">Distance</div><div style="color:${dirCol}">${dir.split(' ')[0]} ${(z.distance_pct||0).toFixed(2)}%</div></div>
+            <div><div style="color:#374151">Bars left</div><div style="color:${barsCol};font-weight:bold">${barsLeft}</div></div>
+            <div><div style="color:#374151">Created (IST)</div><div style="color:#9ca3af;font-family:monospace">${_shortTs(z.created_ist)}</div></div>
+            <div><div style="color:#374151">Expires (IST)</div><div style="color:#9ca3af;font-family:monospace">${_shortTs(z.expiry_ist)}</div></div>
+            <div><div style="color:#374151">Age (bars)</div><div style="color:#6b7280">${z.age_bars}</div></div>
+            <div><div style="color:#374151">Trader lock</div><div style="font-weight:bold;font-size:9px">
+              ${bullLocked?'<span style="color:#4ade80">🟢 Bull</span>':bearLocked?'<span style="color:#f87171">🔴 Bear</span>':'<span style="color:#374151">—</span>'}
+            </div></div>
+          </div>
+        </div>`;
+      };
+
+      // Count all active zones for reference (don't show them on chart but show count)
+      const totalD = demand.length, totalS = supply.length;
+      tbl.innerHTML =
+        `<div style="font-size:9px;color:#4b5563;padding:2px 4px 6px">
+          Showing nearest active zone per type · ${_obCurrentTF} TF ·
+          ${totalD} demand zone${totalD!==1?'s':''} total · ${totalS} supply zone${totalS!==1?'s':''} total
+        </div>` +
+        _zoneCard(nearDemand, true) +
+        _zoneCard(nearSupply, true);
     }
   </script>
+
+  <!-- ── Clock-face time picker singleton ─────────────────────────────── -->
+  <div id="cp-root">
+    <div style="display:flex;justify-content:center;gap:0;margin-bottom:4px">
+      <span class="cp-seg active" id="cp-seg-h" onclick="_cpSetMode('H')">HH</span>
+      <span style="color:#4b5563;font-size:28px;font-weight:bold;margin:0 2px;line-height:1.2">:</span>
+      <span class="cp-seg" id="cp-seg-m" onclick="_cpSetMode('M')">MM</span>
+    </div>
+    <div class="cp-mode" id="cp-mode-hint">tap to select hour</div>
+    <svg id="cp-svg" width="220" height="220" viewBox="-110 -110 220 220"
+         style="display:block;margin:0 auto;cursor:pointer"
+         onclick="_cpClick(event)">
+      <!-- face -->
+      <circle cx="0" cy="0" r="104" fill="#080f1d" stroke="#1e3a5f" stroke-width="1.5"/>
+      <!-- tick marks -->
+      <g id="cp-ticks"></g>
+      <!-- hand -->
+      <line id="cp-hand" x1="0" y1="0" x2="0" y2="-78" stroke="#f59e0b" stroke-width="2"
+            stroke-linecap="round" opacity="0.85"/>
+      <!-- numbers group (rebuilt on mode switch) -->
+      <g id="cp-nums"></g>
+      <!-- selection highlight -->
+      <circle id="cp-sel-dot" cx="0" cy="-78" r="9" fill="#f59e0b" opacity="0"/>
+      <!-- center -->
+      <circle cx="0" cy="0" r="4" fill="#f59e0b"/>
+    </svg>
+    <div class="cp-btn-row">
+      <button class="cp-btn" onclick="_cpCancel()">Cancel</button>
+      <button class="cp-btn cp-ok" onclick="_cpConfirm()">Set ✓</button>
+    </div>
+    <div id="cp-label" style="text-align:center;font-size:9px;color:#374151;margin-top:6px"></div>
+  </div>
 

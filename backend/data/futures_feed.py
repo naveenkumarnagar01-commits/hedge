@@ -193,28 +193,50 @@ _conn: WSConnection = None
 
 async def _mark_price_poller():
     """
-    Fallback: poll REST every 3s for markPrice when WS mark is stale.
-    Binance markPrice@1s in combined streams is unreliable — this ensures
-    the mark never goes stale as long as the REST API is reachable.
+    Fallback: poll REST every 3s for markPrice when WS mark is stale OR WS is fully down.
+    Also publishes TICK_FUTURES so executors receive price ticks even without a WS connection —
+    without this, self.current_price stays 0 and _step() returns immediately, blocking all
+    OB analysis and trade logic.
     """
     import asyncio as _asyncio
+    _last_tick_ts = 0.0   # throttle TICK_FUTURES publish to once per 3s from REST
+
     while True:
         await _asyncio.sleep(3)
         try:
-            if _state["stale"] or (time.time() - _state["mark_ts"]) > 5.0:
+            mark_age = time.time() - _state["mark_ts"]
+            # Run REST fetch if WS mark is stale OR WS is fully down (mark never updated)
+            if _state["stale"] or mark_age > 5.0:
                 url = "https://fapi.binance.com/fapi/v1/premiumIndex?symbol=BTCUSDT"
                 loop = _asyncio.get_event_loop()
-                raw = await loop.run_in_executor(None, lambda: _http_get(url))
+                raw  = await loop.run_in_executor(None, lambda: _http_get(url))
                 import json as _json
                 data = _json.loads(raw)
-                mp = float(data.get("markPrice", 0) or 0)
+                mp   = float(data.get("markPrice", 0) or 0)
                 if mp > 0:
                     now_ts = time.time()
                     _state["mark_price"] = mp
                     _state["mark_ts"]    = now_ts
-                    _state["mark_good"]  = mp    # REST is trusted — always update
-                    _state["stale"]      = False  # Clear stale immediately
-                    log.debug(f"Mark price refreshed via REST: {mp:.2f}")
+                    _state["mark_good"]  = mp
+                    _state["stale"]      = False
+                    log.info(f"Mark price refreshed via REST: {mp:.2f}")
+
+                    # Publish TICK_FUTURES so executors get a price tick even without WS.
+                    # This unblocks _step() which guards on `if not self.current_price: return`.
+                    await bus.publish(TICK_FUTURES, {
+                        "mark_price": mp,
+                        "premium":    _state["premium"],
+                        "bid":        _state["bid"],
+                        "ask":        _state["ask"],
+                        "stale":      False,
+                        "ts":         now_ts,
+                        "source":     "rest_poller",
+                    }, source="futures_feed")
+                    await bus.publish(FEED_STATUS, {
+                        "feed":   "futures_feed",
+                        "status": "ok",
+                        "latency_ms": 0,
+                    }, source="futures_feed")
         except Exception as e:
             log.debug(f"Mark price REST poll failed: {e}")
 
