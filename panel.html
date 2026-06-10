@@ -2633,17 +2633,27 @@
       DONE:      '#a78bfa',
     };
 
-    // Add-event form input state (persists across renders)
-    let _volNewEventName  = '';
-    let _volNewEventTime  = '';
-    let _volEditingId     = null;   // id of event currently being edited in-place
-    let _volRenderPending = null;   // debounce timer for full tab rebuild
+    // Volatile trader tab state (persists across renders)
+    let _volNewEventName   = '';
+    let _volNewEventTime   = '';
+    let _volNewEventParams = {};     // per-event param overrides for the Add form
+    let _volEditingId      = null;   // id of event currently being edited in-place
+    let _volRenderPending  = null;   // debounce timer for full tab rebuild
+    let _volActiveTab      = 'events'; // 'events' | 'trade' | 'settings' | 'log'
+    let _volSessionLog     = [];     // cached session events for log tab
 
     function _volAddEvent() {
       const n = _volNewEventName.trim();
       const t = _volNewEventTime.trim();
-      if (!n) { alert('Please enter an event name.'); return; }
-      if (!t) { alert('Please enter the event date and time.'); return; }
+      if (!n) { _volShowFeedback('Enter an event name.', '#f87171'); return; }
+      if (!t) { _volShowFeedback('Enter the event date and time.', '#f87171'); return; }
+
+      // Collect per-event params (only if non-empty)
+      const params = {};
+      ['combined_premium_max','tp_multiplier','strike_gap','strike_gap_tolerance','contract_qty','min_ask_qty'].forEach(k => {
+        const v = _volNewEventParams[k];
+        if (v !== undefined && v !== '' && !isNaN(v)) params[k] = Number(v);
+      });
 
       const btn = document.querySelector('#vol-add-event-btn');
       if (btn) { btn.disabled = true; btn.textContent = 'Saving…'; }
@@ -2651,14 +2661,15 @@
       fetch('/api/volatile/events', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name: n, event_time: t }),
+        body: JSON.stringify({ name: n, event_time: t, params: Object.keys(params).length ? params : undefined }),
       })
       .then(r => r.json())
       .then(d => {
         if (btn) { btn.disabled = false; btn.textContent = '+ Add Event'; }
         if (d.status === 'saved') {
-          _volNewEventName = '';
-          _volNewEventTime = '';
+          _volNewEventName   = '';
+          _volNewEventTime   = '';
+          _volNewEventParams = {};
           // Reload authoritative events list from DB (avoids duplicate from WS+local push)
           fetch('/api/volatile/events').then(r=>r.json()).then(ev => {
             if (!S.vol) S.vol = {};
@@ -2757,6 +2768,20 @@
         .catch(e => alert('Reset failed: ' + e));
     }
 
+    function _volSetTab(tab) {
+      _volActiveTab = tab;
+      if (tab === 'log') _volFetchSessionLog();
+      renderVolatileTab();
+    }
+
+    async function _volFetchSessionLog() {
+      try {
+        const r = await fetch('/api/session-log?trader=VolatileTrader_Paper&limit=200').then(x=>x.json());
+        _volSessionLog = r.events || [];
+        if (_volActiveTab === 'log') renderVolatileTab();
+      } catch(e) { _volSessionLog = []; }
+    }
+
     // Safe re-render: never destroy focused inputs or pending settings edits.
     // Always updates header stats immediately; debounces the full DOM rebuild
     // to prevent button unresponsiveness caused by rapid tick-driven rerenders.
@@ -2785,10 +2810,14 @@
       return m + 'm ' + (secs % 60) + 's';
     }
 
-    // ── Main render function ────────────────────────────────────────────
+    // ── Main render function (tab-based layout) ─────────────────────────
     function renderVolatileTab() {
       if (_volRenderPending) { clearTimeout(_volRenderPending); _volRenderPending = null; }
       const root = el('trader-vol-root'); if (!root) return;
+      // Auto-switch to Trade tab when trading is active
+      const _autoState = (S.vol || {}).state || 'SLEEP';
+      if (['SEARCHING','EXECUTING','MANAGING'].includes(_autoState) && _volActiveTab === 'events')
+        _volActiveTab = 'trade';
       const vol   = S.vol || {};
       const state = vol.state || 'SLEEP';
       const stCol = _VOL_STATE_COLORS[state] || '#6b7280';
@@ -2825,11 +2854,21 @@
           </div>
         </div>`;
 
-      // ── ADD EVENT FORM ──────────────────────────────────────────────────
+      // ── ADD EVENT FORM (with per-event params) ──────────────────────────
+      function _vpi(k, label, step, ph) {
+        const v = _volNewEventParams[k];
+        return `<div style="display:flex;flex-direction:column;gap:2px">
+          <label style="font-size:8px;color:#6b7280">${label}</label>
+          <input type="number" step="${step||1}" placeholder="${ph||'default'}"
+            value="${v !== undefined ? v : ''}"
+            oninput="_volNewEventParams['${k}']=this.value"
+            style="width:100%;background:#111;border:1px solid #374151;border-radius:3px;color:#e5e7eb;font-size:10px;padding:3px 6px;text-align:right">
+        </div>`;
+      }
       const addEventHtml = `
         <div style="background:#0d0f1e;border:1px solid #2d2060;border-radius:6px;padding:12px 14px">
-          <div style="font-size:10px;color:#a78bfa;font-weight:bold;letter-spacing:.06em;margin-bottom:8px">ADD EVENT TO TRACK</div>
-          <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end">
+          <div style="font-size:10px;color:#a78bfa;font-weight:bold;letter-spacing:.06em;margin-bottom:8px">ADD EVENT</div>
+          <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end;margin-bottom:8px">
             <div style="display:flex;flex-direction:column;gap:3px;flex:1;min-width:140px">
               <label style="font-size:9px;color:#6b7280">EVENT NAME</label>
               <input type="text" placeholder="e.g. FOMC Rate Decision"
@@ -2839,75 +2878,125 @@
             </div>
             <div style="display:flex;flex-direction:column;gap:3px">
               <label style="font-size:9px;color:#6b7280">DATE &amp; TIME (IST)</label>
-              <input type="datetime-local"
-                value="${_volNewEventTime}"
+              <input type="datetime-local" value="${_volNewEventTime}"
                 oninput="_volNewEventTime=this.value"
                 style="background:#111;border:1px solid #374151;border-radius:3px;color:#e5e7eb;font-size:11px;padding:4px 8px;font-family:monospace">
             </div>
             <button id="vol-add-event-btn" onclick="_volAddEvent()"
               style="padding:5px 16px;background:#3b1f7c;border:1px solid #7c3aed;border-radius:4px;color:#c4b5fd;font-size:11px;font-weight:bold;cursor:pointer;white-space:nowrap">
-              + Add Event
+              + Save Event
             </button>
           </div>
+          <details style="margin-top:4px">
+            <summary style="font-size:9px;color:#6b7280;cursor:pointer;user-select:none">
+              Custom parameters for this event (optional — leave blank to use global defaults)
+            </summary>
+            <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:6px;margin-top:8px">
+              ${_vpi('combined_premium_max','Max Combined Premium ($)',1,'global')}
+              ${_vpi('tp_multiplier','TP Multiplier',0.01,'global')}
+              ${_vpi('strike_gap','Strike Gap (pts)',50,'global')}
+              ${_vpi('strike_gap_tolerance','Gap Tolerance (pts)',10,'global')}
+              ${_vpi('contract_qty','Contract Qty (BTC)',0.1,'global')}
+              ${_vpi('min_ask_qty','Min Ask Qty',0.1,'global')}
+            </div>
+          </details>
           <div id="vol-event-feedback" style="display:none;font-size:10px;margin-top:6px;font-family:monospace"></div>
         </div>`;
 
-      // ── EVENT LIST ──────────────────────────────────────────────────────
+      // ── VERTICAL CALENDAR of events (sorted chronologically, grouped by date) ──
       const events = vol.events || [];
-      const evRows = events.slice().reverse().map(e => {
-        const isTraded  = !!e.traded;
-        const isUpcoming = !isTraded && e.status === 'upcoming';
-        const evMs = new Date(e.event_time + ':00+05:30').getTime();
-        const cdHtml = isUpcoming ? _volFmtCountdown(evMs) : '<span style="color:#4b5563">' + (isTraded ? 'traded' : 'passed') + '</span>';
-        const badge = isTraded
-          ? `<span style="font-size:9px;background:#1e3a5f;color:#60a5fa;padding:1px 6px;border-radius:3px;flex-shrink:0">✓ traded</span>`
-          : isUpcoming
-            ? `<span style="font-size:9px;background:#14532d;color:#4ade80;padding:1px 6px;border-radius:3px;flex-shrink:0">upcoming</span>`
-            : `<span style="font-size:9px;background:#1f2937;color:#4b5563;padding:1px 6px;border-radius:3px;flex-shrink:0">passed</span>`;
+      const isTrading = ['SEARCHING','EXECUTING','MANAGING'].includes(state);
+      const activeEvId = (vol.active_event || {}).id || null;
 
-        // ── EDIT MODE (this row is being edited) ──────────────────────────
-        if (_volEditingId === e.id) {
+      // Group events by date (YYYY-MM-DD)
+      const evByDate = {};
+      events.slice().sort((a,b) => a.event_time > b.event_time ? 1 : -1).forEach(e => {
+        const date = (e.event_time || '').slice(0, 10);
+        if (!evByDate[date]) evByDate[date] = [];
+        evByDate[date].push(e);
+      });
+
+      const calRows = Object.entries(evByDate).map(([date, dayEvents]) => {
+        const [y,m,d] = date.split('-');
+        const dayLabel = date
+          ? new Date(Number(y), Number(m)-1, Number(d)).toLocaleDateString('en-IN',{weekday:'short',day:'numeric',month:'short',year:'2-digit'})
+          : '—';
+        const evHtml = dayEvents.map(e => {
+          const isTraded   = !!e.traded;
+          const evMs       = new Date(e.event_time + ':00+05:30').getTime();
+          const isUpcoming = !isTraded && evMs > Date.now();
+          const isActive   = e.id === activeEvId;
+          // Ineligible: another trade is running and this event's window is now (but not the active one)
+          const isInelig   = isUpcoming && isTrading && !isActive;
+          const timeStr    = (e.event_time || '').slice(11, 16) || '?';
+          const cdHtml     = isUpcoming ? _volFmtCountdown(evMs) : '';
+
+          // Badge
+          const badge = isActive
+            ? `<span style="font-size:8px;background:#4c1d95;color:#c4b5fd;padding:1px 6px;border-radius:3px;flex-shrink:0">ACTIVE</span>`
+            : isTraded
+            ? `<span style="font-size:8px;background:#1e3a5f;color:#60a5fa;padding:1px 6px;border-radius:3px;flex-shrink:0">traded</span>`
+            : isInelig
+            ? `<span style="font-size:8px;background:#1c0505;color:#f87171;padding:1px 6px;border-radius:3px;flex-shrink:0">ineligible</span>`
+            : isUpcoming
+            ? `<span style="font-size:8px;background:#14532d;color:#4ade80;padding:1px 6px;border-radius:3px;flex-shrink:0">upcoming</span>`
+            : `<span style="font-size:8px;background:#1f2937;color:#4b5563;padding:1px 6px;border-radius:3px;flex-shrink:0">passed</span>`;
+
+          // Per-event params badge
+          const ep = e.params || {};
+          const paramsNote = Object.keys(ep).length
+            ? `<span style="font-size:8px;color:#7c3aed;background:#1e1030;border:1px solid #2d2060;padding:0 5px;border-radius:3px;margin-left:4px" title="${JSON.stringify(ep)}">⚙ custom</span>`
+            : '';
+
+          if (_volEditingId === e.id) return `
+            <div style="display:flex;align-items:center;gap:5px;padding:5px 8px;border-bottom:1px solid #0d0d0d;background:#0d1020">
+              ${badge}
+              <input id="vol-edit-name-${e.id}" type="text" value="${esc(e.name)}"
+                style="flex:1;background:#111;border:1px solid #7c3aed;border-radius:3px;color:#e5e7eb;font-size:10px;padding:2px 6px"
+                onkeydown="if(event.key==='Enter')_volSaveEventEdit('${e.id}');if(event.key==='Escape')_volCancelEventEdit()">
+              <input id="vol-edit-time-${e.id}" type="datetime-local" value="${e.event_time}"
+                style="background:#111;border:1px solid #7c3aed;border-radius:3px;color:#e5e7eb;font-size:9px;padding:2px 5px"
+                onkeydown="if(event.key==='Enter')_volSaveEventEdit('${e.id}');if(event.key==='Escape')_volCancelEventEdit()">
+              <button onclick="_volSaveEventEdit('${e.id}')" style="font-size:9px;padding:1px 8px;background:#14532d;border:1px solid #16a34a;border-radius:3px;color:#4ade80;cursor:pointer">✓</button>
+              <button onclick="_volCancelEventEdit()" style="font-size:9px;padding:1px 6px;background:#111;border:1px solid #374151;border-radius:3px;color:#6b7280;cursor:pointer">✕</button>
+            </div>`;
+
           return `
-          <div style="display:flex;align-items:center;gap:6px;padding:6px 10px;border-bottom:1px solid #111;background:#0d1020">
-            ${badge}
-            <input id="vol-edit-name-${e.id}" type="text" value="${esc(e.name)}"
-              style="flex:1;background:#111;border:1px solid #7c3aed;border-radius:3px;color:#e5e7eb;font-size:11px;padding:3px 7px;font-family:monospace"
-              placeholder="Event name" onkeydown="if(event.key==='Enter')_volSaveEventEdit('${e.id}');if(event.key==='Escape')_volCancelEventEdit()">
-            <input id="vol-edit-time-${e.id}" type="datetime-local" value="${e.event_time}"
-              style="background:#111;border:1px solid #7c3aed;border-radius:3px;color:#e5e7eb;font-size:10px;padding:3px 6px"
-              onkeydown="if(event.key==='Enter')_volSaveEventEdit('${e.id}');if(event.key==='Escape')_volCancelEventEdit()">
-            <button onclick="_volSaveEventEdit('${e.id}')"
-              style="font-size:9px;padding:2px 10px;background:#14532d;border:1px solid #16a34a;border-radius:3px;color:#4ade80;cursor:pointer;font-weight:bold">✓ Save</button>
-            <button onclick="_volCancelEventEdit()"
-              style="font-size:9px;padding:2px 8px;background:#111;border:1px solid #374151;border-radius:3px;color:#6b7280;cursor:pointer">✕</button>
-          </div>`;
-        }
+            <div style="display:flex;align-items:center;gap:6px;padding:5px 8px;border-bottom:1px solid #0d0d0d;transition:background .15s"
+                 onmouseenter="this.style.background='#0a0f1e'" onmouseleave="this.style.background='transparent'">
+              <span style="font-size:11px;font-weight:700;color:#4b5563;font-family:monospace;min-width:38px;flex-shrink:0">${timeStr}</span>
+              ${badge}
+              <div style="flex:1;min-width:0;overflow:hidden">
+                <span style="font-size:10px;font-weight:600;color:${isTraded?'#4b5563':isActive?'#c4b5fd':'#e5e7eb'}">${esc(e.name)}</span>
+                ${paramsNote}
+              </div>
+              ${cdHtml ? `<span style="font-size:9px;color:#60a5fa;font-family:monospace;flex-shrink:0">${cdHtml}</span>` : ''}
+              <button onclick="_volEditEvent('${e.id}')" style="font-size:8px;padding:1px 6px;background:transparent;border:1px solid #374151;border-radius:3px;color:#a78bfa;cursor:pointer;flex-shrink:0">✏</button>
+              <button onclick="_volDeleteEvent('${e.id}')" style="font-size:8px;padding:1px 6px;background:#1c0a0a;border:1px solid #7f1d1d;border-radius:3px;color:#f87171;cursor:pointer;flex-shrink:0">✕</button>
+            </div>`;
+        }).join('');
 
-        // ── VIEW MODE ─────────────────────────────────────────────────────
+        const isPast = new Date(date + 'T23:59+05:30') < new Date();
         return `
-          <div style="display:flex;align-items:center;gap:8px;padding:6px 10px;border-bottom:1px solid #111">
-            ${badge}
-            <div style="flex:1;min-width:0">
-              <span style="font-size:11px;color:#e5e7eb;font-weight:bold">${esc(e.name)}</span>
-              <span style="margin-left:8px;font-size:10px;color:#6b7280;font-family:monospace">${e.event_time}</span>
+          <div style="border-bottom:1px solid #1a2540">
+            <div style="padding:4px 10px;background:#080f1d;font-size:9px;font-weight:700;color:${isPast?'#374151':'#a78bfa'};letter-spacing:.05em;text-transform:uppercase">
+              ${dayLabel}
             </div>
-            <span style="font-size:10px;color:#60a5fa;font-family:monospace;min-width:60px;text-align:right;flex-shrink:0">${cdHtml}</span>
-            <button onclick="_volEditEvent('${e.id}')"
-              title="Edit this event"
-              style="font-size:9px;padding:1px 8px;background:transparent;border:1px solid #374151;border-radius:3px;color:#a78bfa;cursor:pointer">✏ Edit</button>
-            <button onclick="_volDeleteEvent('${e.id}')"
-              title="Delete this event"
-              style="font-size:9px;padding:1px 8px;background:#1c0a0a;border:1px solid #7f1d1d;border-radius:3px;color:#f87171;cursor:pointer">✕ Del</button>
+            ${evHtml}
           </div>`;
       }).join('');
-      const eventListHtml = `
-        <div style="background:#0d0d0d;border:1px solid #1f2937;border-radius:6px;overflow:hidden">
-          <div style="font-size:9px;color:#6b7280;letter-spacing:.06em;padding:6px 10px;font-weight:bold;border-bottom:1px solid #1f2937">
-            SAVED EVENTS (${events.length}) — window opens at event time, closes at ${vol.window_close_h||6}:${String(vol.window_close_m||0).padStart(2,'0')} AM IST next day
+
+      const eventCalendarHtml = `
+        <div style="background:#0a0a12;border:1px solid #1f2937;border-radius:6px;overflow:hidden">
+          <div style="padding:6px 10px;background:#0d0d0d;border-bottom:1px solid #1f2937;display:flex;justify-content:space-between;align-items:center">
+            <span style="font-size:9px;color:#6b7280;font-weight:700;letter-spacing:.06em">
+              EVENTS (${events.length}) — window ${vol.window_close_h||6}:${String(vol.window_close_m||0).padStart(2,'0')} AM IST close
+            </span>
+            ${isTrading ? `<span style="font-size:8px;color:#f87171;background:#1c0505;border:1px solid #7f1d1d;padding:1px 6px;border-radius:3px">Trade active — new events saved but not tradeable until session ends</span>` : ''}
           </div>
           ${events.length === 0
-            ? '<div style="font-size:10px;color:#374151;padding:10px">No events saved yet.</div>'
-            : evRows}
+            ? '<div style="font-size:10px;color:#374151;padding:12px;text-align:center">No events saved yet. Add one above.</div>'
+            : calRows}
         </div>`;
 
       // ── SEARCHING scan ──────────────────────────────────────────────────
@@ -3078,17 +3167,69 @@
           </div>
         </div>`;
 
+      // ── Session Log tab content ──────────────────────────────────────────
+      const etypeCol = {
+        search_started:'#60a5fa', trade_entered:'#4ade80', leg_sold:'#f59e0b',
+        session_complete:'#4ade80', snapshot:'#1e3a5f',
+      };
+      const sessionLogHtml = _volSessionLog.length === 0
+        ? `<div style="color:#374151;font-size:10px;padding:16px;text-align:center">
+             No session events yet. Events appear after each trade session completes.
+           </div>`
+        : (() => {
+            // Group by session_date
+            const byDate = {};
+            _volSessionLog.forEach(e => {
+              const d = e.session_date || '?';
+              if (!byDate[d]) byDate[d] = [];
+              byDate[d].push(e);
+            });
+            return Object.entries(byDate).sort(([a],[b]) => b > a ? 1 : -1).map(([date, evts]) => `
+              <div style="margin-bottom:8px">
+                <div style="font-size:8px;color:#475569;font-weight:700;text-transform:uppercase;letter-spacing:.06em;padding:3px 6px;background:#060e1c;border-radius:3px;margin-bottom:4px">${date}</div>
+                ${evts.map(e => {
+                  const ec = etypeCol[e.event_type] || '#6b7280';
+                  return `<div style="display:flex;gap:6px;align-items:flex-start;padding:2px 4px">
+                    <span style="font-family:monospace;font-size:9px;color:#334155;min-width:45px;flex-shrink:0">${(e.event_ts_ist||'').substr(11,5)}</span>
+                    <span style="font-size:8px;font-weight:700;color:${ec};min-width:90px;text-transform:uppercase;flex-shrink:0">${e.event_type}</span>
+                    <span style="font-size:9px;color:#6b7280;flex:1">${e.message||''}</span>
+                  </div>`;
+                }).join('')}
+              </div>`).join('');
+          })();
+
+      // ── Tab bar ──────────────────────────────────────────────────────────
+      const _vt = _volActiveTab;
+      const _vtBtn = (tab, label, alert) => {
+        const isActive = _vt === tab;
+        return `<button onclick="_volSetTab('${tab}')"
+          style="padding:7px 14px;background:transparent;border:none;border-bottom:2px solid ${isActive?'#a78bfa':'transparent'};
+                 color:${isActive?'#a78bfa':'#475569'};font-size:10px;font-weight:${isActive?'700':'500'};cursor:pointer;
+                 white-space:nowrap;position:relative">
+          ${label}${alert?`<span style="position:absolute;top:4px;right:4px;width:6px;height:6px;background:#f59e0b;border-radius:50%"></span>`:''}
+        </button>`;
+      };
+      const tabBar = `
+        <div style="display:flex;align-items:center;border-bottom:1px solid #1a2540;flex-shrink:0;background:#060e1c">
+          ${_vtBtn('events',   '📅 Events', false)}
+          ${_vtBtn('trade',    '⚡ Trade',  isTrading)}
+          ${_vtBtn('settings', '⚙ Settings', false)}
+          ${_vtBtn('log',      '📋 Session Log', false)}
+        </div>`;
+
+      const tabContent = _vt === 'events'
+        ? `<div style="display:flex;flex-direction:column;gap:8px;padding:8px">${addEventHtml}${eventCalendarHtml}</div>`
+        : _vt === 'trade'
+        ? `<div style="display:flex;flex-direction:column;gap:8px;padding:8px">${searchHtml}${posHtml}${logsHtml}</div>`
+        : _vt === 'settings'
+        ? `<div style="padding:8px">${settingsHtml}</div>`
+        : `<div style="padding:8px">${sessionLogHtml}</div>`;
+
       root.innerHTML = `
         <div style="display:flex;flex-direction:column;height:100%;gap:0">
           ${headerHtml}
-          <div style="flex:1;overflow:auto;padding:8px;display:flex;flex-direction:column;gap:8px">
-            ${addEventHtml}
-            ${eventListHtml}
-            ${searchHtml}
-            ${posHtml}
-            ${logsHtml}
-            ${settingsHtml}
-          </div>
+          ${tabBar}
+          <div style="flex:1;min-height:0;overflow-y:auto">${tabContent}</div>
         </div>`;
     }
 
@@ -3328,15 +3469,7 @@
       buildSettings();
       el('save-btn').disabled = false;
     }
-    function _setWk(tr, val) {
-      cfgEdits[tr+'_skip_weekends'] = val;
-      buildSettings();
-      el('save-btn').disabled = false;
-    }
-    
     function _buildCalendarSection(tr) {
-      const skipWkId = `si-${tr}_skip_weekends`;
-      const isSkipWk = (cfgEdits[tr+'_skip_weekends'] ?? CFG[tr+'_skip_weekends']) ? 'checked' : '';
       const blkDates = cfgEdits[tr+'_blackout_dates'] ?? CFG[tr+'_blackout_dates'] ?? '';
       
       let calHtml = `<div style="display:flex;gap:10px;margin:8px 0;overflow-x:auto">`;
@@ -3365,12 +3498,6 @@
       calHtml += `</div>`;
 
       return `
-        <div style="margin-bottom:6px">
-          <label style="display:flex;align-items:center;gap:6px;cursor:pointer">
-            <input type="checkbox" id="${skipWkId}" ${isSkipWk} onchange="_setWk('${tr}', this.checked)">
-            <span>Skip Weekends (Sat/Sun)</span>
-          </label>
-        </div>
         ${calHtml}
         <div style="margin-bottom:6px">
           <div style="margin-bottom:4px">Raw CSV:</div>
@@ -3883,10 +4010,45 @@ async function _updateSessionBanner() {
         Object.assign(CFG, edits);
         _traderCfgEdits[key] = {};
         const btn = el('tc-' + key + '-save-btn'); if (btn) btn.disabled = true;
-        fetch('/api/config').then(r => r.json()).then(c => Object.assign(CFG, c));
+        // Force-re-render the header line row immediately so new times show without
+        // waiting for the next WebSocket tick (can be up to 15s in SLEEP state)
+        if (_traderInited[key]) _updateTraderLive(key, TRADER_CFG[key]);
+        fetch('/api/config').then(r => r.json()).then(c => {
+          Object.assign(CFG, c);
+          if (_traderInited[key]) _updateTraderLive(key, TRADER_CFG[key]);
+        });
         // TF change → reset today's analysis so next window open re-runs on new TF
         if (tfChanged) fetch(`/api/trader/${key}/reset-analysis`, { method: 'POST' }).catch(()=>{});
       }).catch(console.warn);
+    }
+
+    // ── Session-aware countdown helper ─────────────────────────────────────
+    // Returns { text, col, phase } for the next relevant time event.
+    // Phase: 'before'=window not open yet | 'open'=window open | 'closing'=past end, squareoff next | 'done'
+    function _sessionCountdown(startH, startM, endH, endM, forceH, forceM) {
+      const now = new Date();
+      // IST = UTC + 5h30m = UTC + 330 minutes
+      const istMins = (now.getUTCHours() * 60 + now.getUTCMinutes() + 330) % 1440;
+      const expH = CFG.session_expiry_h ?? 13;
+      const expM = (CFG.session_expiry_m ?? 30) + 1; // session starts 1 min AFTER expiry
+      const sessStart = (expH * 60 + expM) % 1440;
+      // Map a clock time to its position WITHIN the current session (0 = session open)
+      const toSess = (h, m) => ((h * 60 + m) - sessStart + 1440) % 1440;
+      const fmtDiff = (d) => {
+        const h = Math.floor(d / 60), m = d % 60;
+        return h > 0 ? `${h}h ${m > 0 ? m + 'm' : ''}`.trim() : `${m}m`;
+      };
+      const cur   = toSess(Math.floor(istMins / 60), istMins % 60);
+      const start = toSess(startH, startM);
+      const end   = toSess(endH,   endM);
+      const force = toSess(forceH, forceM);
+      if (cur < start)
+        return { text: `Opens in ${fmtDiff(start - cur)}`,    col: '#60a5fa', phase: 'before'  };
+      if (cur < end)
+        return { text: `Closes in ${fmtDiff(end - cur)}`,     col: '#4ade80', phase: 'open'    };
+      if (cur < force)
+        return { text: `Squareoff in ${fmtDiff(force - cur)}`,col: '#f59e0b', phase: 'closing' };
+      return   { text: `Session complete`,                     col: '#475569', phase: 'done'    };
     }
 
     // ── LAYER 2 — Live updater (called every WS event, no DOM rebuild) ────
@@ -3936,20 +4098,28 @@ async function _updateSessionBanner() {
       const _obWaitLR      = !!(posD||{}).ob_wait_active;
       const _obWaitSinceLR = (posD||{}).ob_wait_since || '';
       const _obFormedLR    = !!ar.ob_formed_during_window;
+
+      // ── Countdown badge (session-aware) ──────────────────────────────────
+      const _cd = _sessionCountdown(startH, startM, endH, endM, forceH, forceM);
+      const _cdBadge = `<span style="font-size:9px;font-weight:700;color:${_cd.col};background:#050a14;border:1px solid ${_cd.col}55;padding:1px 8px;border-radius:10px;white-space:nowrap">${_cd.text}</span>`;
+
       const lineRow = el(`tc-${key}-line-row`);
       if (lineRow) lineRow.innerHTML = isAnalyzing
         ? `<span style="color:#60a5fa;font-size:10px;animation:blink-pend 1s ease-in-out infinite">⟳ Running S/R analysis with current parameters — please wait...</span>`
         : _obWaitLR
           ? `<span style="font-size:10px;padding:1px 8px;background:#1a1208;border:1px solid #92400e;border-radius:3px;color:#f59e0b;font-weight:bold;animation:blink-pend 2s ease-in-out infinite">⏳ OB WATCH</span>
              <span class="gr" style="font-size:9px">No ${ar.ob_type||(key==='bull'?'demand':'supply')} zone at open${_obWaitSinceLR?' · since '+_obWaitSinceLR.substring(11,16):''} — watching ${(ar.tf||CFG[pfx+'ob_tf']||CFG['ob_tf']||'15m').toUpperCase()} candles</span>
-             <span class="gr">Squareoff: <span class="r">${ft(forceH,forceM)}</span> IST</span>`
+             <span class="gr">Window: ${ft(startH,startM)}–${ft(endH,endM)} IST · Squareoff: <span class="r">${ft(forceH,forceM)}</span></span>
+             ${_cdBadge}`
           : target
           ? `<span style="font-size:10px;padding:1px 8px;background:#0f172a;border:1px solid ${tc.col};border-radius:3px;color:${tc.col};font-weight:bold">🔒 Target: $${fmt(target,0)}</span>
              ${arLabel ? `<span style="font-size:8px;color:#374151;font-family:monospace;background:#0a0a14;padding:1px 4px;border-radius:2px;margin-left:2px">${arLabel}</span>` : ''}
              ${_obFormedLR ? `<span style="font-size:8px;color:#f59e0b;border:1px solid #92400e;padding:0 3px;border-radius:2px;margin-left:2px">FORMED DURING WINDOW</span>` : ''}
              <span class="gr">${dist!=null?'dist '+fmt(dist,0)+' pts':'—'}</span>
-             <span class="gr">Squareoff: <span class="r">${ft(forceH,forceM)}</span> IST</span>`
-          : `<span class="gr">Window: ${ft(startH,startM)}–${ft(endH,endM)} IST · Squareoff: <span class="r">${ft(forceH,forceM)}</span></span>`;
+             <span class="gr">Window: ${ft(startH,startM)}–${ft(endH,endM)} IST · Squareoff: <span class="r">${ft(forceH,forceM)}</span></span>
+             ${_cdBadge}`
+          : `<span class="gr">Window: ${ft(startH,startM)}–${ft(endH,endM)} IST · Squareoff: <span class="r">${ft(forceH,forceM)}</span></span>
+             ${_cdBadge}`;
 
       // ── Update chart target line when locked (only from real analysis) ──
       const hasRealAnalysis = !!(ar.ob_zone);
@@ -4019,11 +4189,13 @@ async function _updateSessionBanner() {
       const realized= pos.session_realized_futures_pnl||0;
       const remaining=Math.max(session-realized,0);
 
+      const _wfCd = _sessionCountdown(startH, startM, endH, endM, forceH, forceM);
       wfEl.innerHTML =
         _step(inWin||inPos, !inWin&&!inPos&&!state.includes('SLEEP'), false,
           `Trading window ${inWin?'OPEN':'CLOSED'}`,
-          inWin?`${ft(startH,startM)}–${ft(endH,endM)} IST · Squareoff ${ft(forceH,forceM)}`
-               :(() => { const n=new Date(),nm=n.getHours()*60+n.getMinutes(),sm=startH*60+startM,d=(sm-nm+1440)%1440; return `Reopens ${ft(startH,startM)} IST`+(d<=120?` — in ${d} min`:''); })()) +
+          inWin
+            ? `${ft(startH,startM)}–${ft(endH,endM)} IST · Squareoff ${ft(forceH,forceM)} · <b style="color:${_wfCd.col}">${_wfCd.text}</b>`
+            : `${ft(startH,startM)}–${ft(endH,endM)} IST · Squareoff ${ft(forceH,forceM)} · <b style="color:${_wfCd.col}">${_wfCd.text}</b>`) +
 
         (() => {
           const ar         = pos.analysis_report || {};
@@ -7644,37 +7816,56 @@ async function _updateSessionBanner() {
           </div>` : ''}
         </div>`;
 
+      // Group trades by session_id for cleaner display
+      const _groups = [];
+      let _lastSid = null;
+      for (const t of trades) {
+        const sid = t.session_id || '__unknown__';
+        if (sid !== _lastSid) { _groups.push({ sid, trades: [] }); _lastSid = sid; }
+        _groups[_groups.length - 1].trades.push(t);
+      }
+
+      const tradeRows = _groups.map(g => {
+        const sid = g.sid;
+        const sessLabel = sid === '__unknown__' ? 'No session' :
+          sid.replace('_IST','').replace(/_/g,' ').replace(/^notrade /,'').trim();
+        const groupPnl  = g.trades.reduce((s,t) => s + (t.pnl||0), 0);
+        const gpCol     = groupPnl > 0 ? '#4ade80' : groupPnl < 0 ? '#f87171' : '#475569';
+        const separator = `<tr>
+          <td colspan="7" style="padding:3px 10px;background:#060e1c;border-top:1px solid #1a2540;border-bottom:1px solid #1a2540">
+            <span style="font-size:8px;font-weight:700;color:#4b5563;font-family:monospace;text-transform:uppercase;letter-spacing:.05em">${sessLabel}</span>
+            <span style="font-size:9px;font-family:monospace;font-weight:700;color:${gpCol};float:right">${groupPnl===0?'entry only':(groupPnl>0?'+':'')+groupPnl.toFixed(2)}</span>
+          </td></tr>`;
+        const rows = g.trades.map(t => {
+          const pnlCol  = (t.pnl||0) > 0 ? '#4ade80' : (t.pnl||0) < 0 ? '#f87171' : '#6b7280';
+          const sideCol = t.side === 'BUY' ? '#4ade80' : '#f87171';
+          return `<tr style="border-bottom:1px solid #0d1525">
+            <td style="padding:3px 6px;font-family:monospace;color:#9ca3af;white-space:nowrap;font-size:9px">${(t.ts_ist||'—').substr(11,8)}</td>
+            <td style="padding:3px 6px;color:${col};font-size:9px;font-weight:600">${t.action||'—'}</td>
+            <td style="padding:3px 6px;color:#93c5fd;font-family:monospace;font-size:9px">${t.symbol||'BTCUSDT'}</td>
+            <td style="padding:3px 6px;text-align:center;color:${sideCol};font-weight:bold">${t.side||'—'}</td>
+            <td style="padding:3px 6px;text-align:right;font-family:monospace;font-size:9px">${t.qty??'—'}</td>
+            <td style="padding:3px 6px;text-align:right;font-family:monospace;font-size:9px">${t.fill_price?'$'+Number(t.fill_price).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2}):'—'}</td>
+            <td style="padding:3px 6px;text-align:right;font-family:monospace;color:${pnlCol};font-size:9px;font-weight:${(t.pnl||0)!==0?'700':'400'}">${(t.pnl||0)===0?'entry':((t.pnl||0)>0?'+':'')+Number(t.pnl).toFixed(2)}</td>
+          </tr>`;
+        }).join('');
+        return separator + rows;
+      }).join('');
+
       return summaryHtml + `
         <table style="width:100%;border-collapse:collapse;font-size:10px">
           <thead>
             <tr style="background:#0a0f1e;position:sticky;top:0">
-              <th style="text-align:left;padding:4px 6px;color:#4b5563;font-weight:normal;border-bottom:1px solid #1a2540">Timestamp IST</th>
+              <th style="text-align:left;padding:4px 6px;color:#4b5563;font-weight:normal;border-bottom:1px solid #1a2540">Time IST</th>
               <th style="text-align:left;padding:4px 6px;color:#4b5563;font-weight:normal;border-bottom:1px solid #1a2540">Action</th>
               <th style="text-align:left;padding:4px 6px;color:#4b5563;font-weight:normal;border-bottom:1px solid #1a2540">Symbol</th>
               <th style="text-align:center;padding:4px 6px;color:#4b5563;font-weight:normal;border-bottom:1px solid #1a2540">Side</th>
               <th style="text-align:right;padding:4px 6px;color:#4b5563;font-weight:normal;border-bottom:1px solid #1a2540">Qty</th>
               <th style="text-align:right;padding:4px 6px;color:#4b5563;font-weight:normal;border-bottom:1px solid #1a2540">Fill Price</th>
               <th style="text-align:right;padding:4px 6px;color:#4b5563;font-weight:normal;border-bottom:1px solid #1a2540">PnL</th>
-              <th style="text-align:left;padding:4px 6px;color:#4b5563;font-weight:normal;border-bottom:1px solid #1a2540">Session</th>
             </tr>
           </thead>
-          <tbody>
-            ${trades.map(t => {
-              const pnlCol  = (t.pnl||0) > 0 ? '#4ade80' : (t.pnl||0) < 0 ? '#f87171' : '#6b7280';
-              const sideCol = t.side === 'BUY' ? '#4ade80' : '#f87171';
-              const sessShort = (t.session_id || '').replace('_IST','').replace(/_/g,' ');
-              return `<tr style="border-bottom:1px solid #0d1525">
-                <td style="padding:3px 6px;font-family:monospace;color:#9ca3af;white-space:nowrap;font-size:9px">${t.ts_ist || '—'}</td>
-                <td style="padding:3px 6px;color:${col};font-size:9px">${t.action || '—'}</td>
-                <td style="padding:3px 6px;color:#93c5fd;font-family:monospace;font-size:9px">${t.symbol || 'BTCUSDT'}</td>
-                <td style="padding:3px 6px;text-align:center;color:${sideCol};font-weight:bold">${t.side || '—'}</td>
-                <td style="padding:3px 6px;text-align:right;font-family:monospace;font-size:9px">${t.qty ?? '—'}</td>
-                <td style="padding:3px 6px;text-align:right;font-family:monospace;font-size:9px">${t.fill_price ? '$'+Number(t.fill_price).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2}) : '—'}</td>
-                <td style="padding:3px 6px;text-align:right;font-family:monospace;color:${pnlCol};font-size:9px">${(t.pnl||0)===0?'—':((t.pnl||0)>0?'+':'')+Number(t.pnl).toFixed(2)}</td>
-                <td style="padding:3px 6px;color:#4b5563;font-size:8px;font-family:monospace;max-width:90px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${t.session_id||''}">${sessShort||'—'}</td>
-              </tr>`;
-            }).join('')}
-          </tbody>
+          <tbody>${tradeRows}</tbody>
         </table>`;
     }
 
@@ -7801,78 +7992,164 @@ async function _updateSessionBanner() {
     }
 
     function _buildSessionLog(sessions, col) {
-      if (!sessions.length) return '<div style="color:#475569;padding:16px;font-size:10px;text-align:center">No completed sessions found in the database.</div>';
+      if (!sessions.length) return '<div style="color:#475569;padding:16px;font-size:10px;text-align:center">No sessions recorded yet. Sessions appear here after each squareoff.</div>';
 
-      // Summary across all sessions
-      const totalPnl = sessions.reduce((s,r) => s + (r.total_pnl||0), 0);
-      const wins     = sessions.filter(r => r.total_pnl > 0).length;
-      const losses   = sessions.filter(r => r.total_pnl < 0).length;
-      const wr       = sessions.length ? Math.round(wins/sessions.length*100) : 0;
-      const netCol   = totalPnl >= 0 ? '#4ade80' : '#f87171';
+      const tradeSess  = sessions.filter(r => r.status !== 'no_trade');
+      const noTradeDays= sessions.filter(r => r.status === 'no_trade').length;
+      const totalPnl   = tradeSess.reduce((s,r) => s + (r.total_pnl||0), 0);
+      const wins       = tradeSess.filter(r => r.total_pnl > 0).length;
+      const losses     = tradeSess.filter(r => r.total_pnl < 0).length;
+      const wr         = tradeSess.length ? Math.round(wins/tradeSess.length*100) : 0;
+      const avgPnl     = tradeSess.length ? totalPnl/tradeSess.length : 0;
+      const netCol     = totalPnl >= 0 ? '#4ade80' : '#f87171';
+      const avgCol     = avgPnl  >= 0 ? '#4ade80' : '#f87171';
+
+      const rows = sessions.map((s,idx) => {
+        const pnl      = s.total_pnl   || 0;
+        const futPnl   = s.futures_pnl || 0;
+        const hedgePnl = s.hedge_pnl   || 0;
+        const pnlCol   = pnl > 0 ? '#4ade80' : pnl < 0 ? '#f87171' : '#6b7280';
+        const fPnlCol  = futPnl  > 0 ? '#4ade80' : futPnl  < 0 ? '#f87171' : '#6b7280';
+        const hPnlCol  = hedgePnl> 0 ? '#4ade80' : hedgePnl < 0 ? '#f87171' : '#6b7280';
+        const isOpen    = s.status === 'open';
+        const isNoTrade = s.status === 'no_trade';
+        const isSQ      = s.is_force_closed === 1;
+        const statLabel = isOpen ? 'OPEN' : isNoTrade ? 'NO TRADE' : isSQ ? 'SQUAREOFF' : (pnl > 0 ? 'PROFIT' : 'LOSS');
+        const statBg    = isOpen ? '#1a1f00' : isNoTrade ? '#0a0f1e' : pnl > 0 ? '#052e16' : '#1c0a0a';
+        const statCol   = isOpen ? '#f59e0b' : isNoTrade ? '#475569' : pnl > 0 ? '#4ade80' : '#f87171';
+        const uid      = `sl-${idx}`;
+        const entryT   = s.entry_ts_ist  ? s.entry_ts_ist.substr(11,5)  : '—';
+        const closeT   = s.close_ts_ist  ? s.close_ts_ist.substr(11,5)  : '—';
+        const sid      = s.session_id || '';
+        return `
+          <tr id="${uid}-row" style="border-bottom:1px solid #0d1525;cursor:pointer"
+              onclick="_slToggle('${uid}','${sid}')"
+              onmouseenter="this.style.background='#080f1d'" onmouseleave="this.style.background='transparent'">
+            <td style="padding:5px 10px">
+              <div style="font-size:9px;font-weight:600;color:${col};font-family:monospace">${s.session_date} · ${entryT}→${closeT}</div>
+              <div style="font-size:8px;color:#334155;margin-top:1px">${s.entry_zone||'no zone'} · target $${s.target_line?Number(s.target_line).toFixed(0):'—'}
+                ${s.balance_before!=null?`· bal $${Number(s.balance_before).toFixed(0)}→$${s.balance_after!=null?Number(s.balance_after).toFixed(0):'?'}`:''}
+              </div>
+            </td>
+            <td style="padding:5px 8px;text-align:right;font-family:monospace;font-size:10px;color:#94a3b8">${s.entry_price ? '$'+Number(s.entry_price).toLocaleString('en-US',{maximumFractionDigits:0}) : '—'}</td>
+            <td style="padding:5px 8px;text-align:right;font-family:monospace;font-size:10px;color:${fPnlCol}">${futPnl===0?'—':(futPnl>0?'+':'')+futPnl.toFixed(2)}</td>
+            <td style="padding:5px 8px;text-align:right;font-family:monospace;font-size:10px;color:${hPnlCol}">${hedgePnl===0?'—':(hedgePnl>0?'+':'')+hedgePnl.toFixed(2)}</td>
+            <td style="padding:5px 8px;text-align:right;font-family:monospace;font-size:11px;font-weight:700;color:${pnlCol}">${pnl===0?'—':(pnl>0?'+':'')+pnl.toFixed(2)}</td>
+            <td style="padding:5px 8px;text-align:center">
+              <span style="background:${statBg};color:${statCol};padding:2px 7px;border-radius:10px;font-size:8px;font-weight:600;border:1px solid ${statCol}33">${statLabel}</span>
+            </td>
+          </tr>
+          <tr id="${uid}-detail" style="display:none">
+            <td colspan="6" style="padding:0;background:#030810">
+              <div id="${uid}-inner" style="padding:8px 14px;font-size:10px;color:#6b7280">Loading…</div>
+            </td>
+          </tr>`;
+      }).join('');
 
       return `
-        <!-- Session summary stats -->
-        <div style="display:grid;grid-template-columns:repeat(4,1fr);border-bottom:1px solid #1a2540;background:#050c18">
+        <div style="display:grid;grid-template-columns:repeat(7,1fr);border-bottom:1px solid #1a2540;background:#050c18;flex-shrink:0">
           ${[
-            ['Total Sessions', sessions.length, '#94a3b8'],
-            ['Wins',           wins,             '#4ade80'],
-            ['Losses',         losses,           '#f87171'],
-            ['Win Rate',       wr+'%',           wr>=50?'#4ade80':'#f87171'],
-          ].map(([l,v,c]) => `
-            <div style="padding:6px 10px;border-right:1px solid #1a2540;text-align:center">
-              <div style="font-size:7px;color:#475569;text-transform:uppercase;letter-spacing:.07em;margin-bottom:1px">${l}</div>
-              <div style="font-size:12px;font-weight:700;font-family:monospace;color:${c}">${v}</div>
-            </div>`).join('')}
+            ['Traded',    tradeSess.length,                       '#94a3b8'],
+            ['No-Trade',  noTradeDays,                            '#475569'],
+            ['Wins',      wins,                                   '#4ade80'],
+            ['Losses',    losses,                                 '#f87171'],
+            ['Win%',      wr+'%',                                 wr>=50?'#4ade80':'#f87171'],
+            ['Net PnL',   (totalPnl>=0?'+':'')+totalPnl.toFixed(2), netCol],
+            ['Avg/Trade', (avgPnl>=0?'+':'')+avgPnl.toFixed(2),  avgCol],
+          ].map(([l,v,c])=>`<div style="padding:6px 8px;border-right:1px solid #1a2540;text-align:center">
+              <div style="font-size:7px;color:#475569;text-transform:uppercase;letter-spacing:.07em">${l}</div>
+              <div style="font-size:11px;font-weight:700;font-family:monospace;color:${c}">${v}</div></div>`).join('')}
         </div>
-        <!-- Sessions table -->
         <table style="width:100%;border-collapse:collapse;font-size:10px">
-          <thead>
-            <tr style="background:#060e1c;position:sticky;top:0">
-              <th style="text-align:left;padding:5px 10px;color:#475569;font-weight:600;border-bottom:1px solid #1a2540;font-size:8px;letter-spacing:.05em;text-transform:uppercase">Session Name</th>
-              <th style="text-align:right;padding:5px 8px;color:#475569;font-weight:600;border-bottom:1px solid #1a2540;font-size:8px;letter-spacing:.05em;text-transform:uppercase">Entry Price</th>
-              <th style="text-align:left;padding:5px 8px;color:#475569;font-weight:600;border-bottom:1px solid #1a2540;font-size:8px;letter-spacing:.05em;text-transform:uppercase">Zone</th>
-              <th style="text-align:right;padding:5px 8px;color:#475569;font-weight:600;border-bottom:1px solid #1a2540;font-size:8px;letter-spacing:.05em;text-transform:uppercase">Fut PnL</th>
-              <th style="text-align:right;padding:5px 8px;color:#475569;font-weight:600;border-bottom:1px solid #1a2540;font-size:8px;letter-spacing:.05em;text-transform:uppercase">Hedge PnL</th>
-              <th style="text-align:right;padding:5px 8px;color:#475569;font-weight:600;border-bottom:1px solid #1a2540;font-size:8px;letter-spacing:.05em;text-transform:uppercase">Total PnL</th>
-              <th style="text-align:center;padding:5px 8px;color:#475569;font-weight:600;border-bottom:1px solid #1a2540;font-size:8px;letter-spacing:.05em;text-transform:uppercase">Status</th>
-            </tr>
-          </thead>
-          <tbody>
-            ${sessions.map((s,idx) => {
-              const pnl     = s.total_pnl  || 0;
-              const futPnl  = s.futures_pnl || 0;
-              const hedgePnl= s.hedge_pnl  || 0;
-              const pnlCol  = pnl > 0 ? '#4ade80' : pnl < 0 ? '#f87171' : '#6b7280';
-              const fPnlCol = futPnl > 0 ? '#4ade80' : futPnl < 0 ? '#f87171' : '#6b7280';
-              const hPnlCol = hedgePnl > 0 ? '#4ade80' : hedgePnl < 0 ? '#f87171' : '#6b7280';
-              const isOpen  = s.status === 'open';
-              const statBg  = isOpen ? '#1a1f00' : pnl > 0 ? '#052e16' : pnl < 0 ? '#1c0a0a' : '#0a0f1e';
-              const statCol = isOpen ? '#f59e0b' : pnl > 0 ? '#4ade80' : '#f87171';
-              const sName   = _sessionName(s);
-              return `<tr style="border-bottom:1px solid #0d1525;transition:background .15s" onmouseenter="this.style.background='#080f1d'" onmouseleave="this.style.background='transparent'">
-                <td style="padding:5px 10px">
-                  <div style="font-size:9px;font-weight:600;color:${col};font-family:monospace">${sName}</div>
-                  <div style="font-size:8px;color:#334155;margin-top:1px">ID: ${(s.session_id||'').slice(0,28)}</div>
-                </td>
-                <td style="padding:5px 8px;text-align:right;font-family:monospace;font-size:10px;color:#94a3b8">${s.entry_price ? '$'+Number(s.entry_price).toLocaleString('en-US',{minimumFractionDigits:0,maximumFractionDigits:0}) : '—'}</td>
-                <td style="padding:5px 8px;color:#64748b;font-size:9px">${s.entry_zone || '—'}</td>
-                <td style="padding:5px 8px;text-align:right;font-family:monospace;font-size:10px;color:${fPnlCol}">${futPnl===0?'—':(futPnl>0?'+':'')+futPnl.toFixed(2)}</td>
-                <td style="padding:5px 8px;text-align:right;font-family:monospace;font-size:10px;color:${hPnlCol}">${hedgePnl===0?'—':(hedgePnl>0?'+':'')+hedgePnl.toFixed(2)}</td>
-                <td style="padding:5px 8px;text-align:right;font-family:monospace;font-size:11px;font-weight:700;color:${pnlCol}">${pnl===0?'—':(pnl>0?'+':'')+pnl.toFixed(2)}</td>
-                <td style="padding:5px 8px;text-align:center">
-                  <span style="background:${statBg};color:${statCol};padding:2px 7px;border-radius:10px;font-size:8px;font-weight:600;border:1px solid ${statCol}33">${isOpen ? 'OPEN' : (pnl>0?'PROFIT':'LOSS')}</span>
-                </td>
-              </tr>`;
-            }).join('')}
-          </tbody>
-          <tfoot>
-            <tr style="background:#060e1c;border-top:2px solid #1a2540">
-              <td colspan="5" style="padding:5px 10px;font-size:9px;font-weight:700;color:#475569">NET SESSION PnL (${sessions.length} sessions)</td>
-              <td style="padding:5px 8px;text-align:right;font-family:monospace;font-size:11px;font-weight:700;color:${netCol}">${totalPnl===0?'$0.00':(totalPnl>0?'+':'')+totalPnl.toFixed(2)}</td>
-              <td></td>
-            </tr>
-          </tfoot>
+          <thead><tr style="background:#060e1c;position:sticky;top:0">
+            <th style="text-align:left;padding:5px 10px;color:#475569;font-size:8px;border-bottom:1px solid #1a2540;text-transform:uppercase">Date · Window</th>
+            <th style="text-align:right;padding:5px 8px;color:#475569;font-size:8px;border-bottom:1px solid #1a2540;text-transform:uppercase">Entry</th>
+            <th style="text-align:right;padding:5px 8px;color:#475569;font-size:8px;border-bottom:1px solid #1a2540;text-transform:uppercase">Fut PnL</th>
+            <th style="text-align:right;padding:5px 8px;color:#475569;font-size:8px;border-bottom:1px solid #1a2540;text-transform:uppercase">Hedge PnL</th>
+            <th style="text-align:right;padding:5px 8px;color:#475569;font-size:8px;border-bottom:1px solid #1a2540;text-transform:uppercase">Total PnL</th>
+            <th style="text-align:center;padding:5px 8px;color:#475569;font-size:8px;border-bottom:1px solid #1a2540;text-transform:uppercase">Result</th>
+          </tr></thead>
+          <tbody>${rows}</tbody>
+          <tfoot><tr style="background:#060e1c;border-top:2px solid #1a2540">
+            <td colspan="4" style="padding:5px 10px;font-size:9px;font-weight:700;color:#475569">NET PnL — ${tradeSess.length} traded · ${noTradeDays} no-trade</td>
+            <td style="padding:5px 8px;text-align:right;font-family:monospace;font-size:11px;font-weight:700;color:${netCol}">${(totalPnl>=0?'+':'')+totalPnl.toFixed(2)}</td>
+            <td></td>
+          </tr></tfoot>
         </table>`;
+    }
+
+    async function _slToggle(uid, sid) {
+      const detail = document.getElementById(uid + '-detail');
+      const inner  = document.getElementById(uid + '-inner');
+      if (!detail) return;
+      if (detail.style.display !== 'none') { detail.style.display = 'none'; return; }
+      detail.style.display = 'table-row';
+      if (!inner) return;
+      inner.textContent = 'Loading trades & timeline…';
+      try {
+        const [tRes, eRes] = await Promise.all([
+          fetch(`/api/journal/sessions/${encodeURIComponent(sid)}/trades`).then(r=>r.json()),
+          fetch(`/api/journal/sessions/${encodeURIComponent(sid)}/events`).then(r=>r.json()),
+        ]);
+        const trades = tRes.trades || [];
+        const events = eRes.events || [];
+
+        let html = '';
+        // ── Trades table ──
+        if (trades.length) {
+          html += `<div style="font-size:9px;font-weight:700;color:#475569;text-transform:uppercase;letter-spacing:.06em;margin-bottom:4px">Trades</div>
+            <table style="width:100%;border-collapse:collapse;font-size:10px;margin-bottom:10px">
+              <tr style="color:#4b5563"><th style="text-align:left;padding:2px 6px">Time</th><th>Action</th><th>Symbol</th><th>Side</th><th style="text-align:right">Qty</th><th style="text-align:right">Price</th><th style="text-align:right">PnL</th></tr>
+              ${trades.map(t=>`<tr style="border-top:1px solid #0d1525">
+                <td style="padding:2px 6px;color:#6b7280;font-family:monospace">${(t.ts_ist||'').substr(11,8)}</td>
+                <td style="padding:2px 6px;color:#93c5fd;font-weight:600">${t.action}</td>
+                <td style="padding:2px 6px;color:#94a3b8;font-family:monospace">${t.symbol||''}</td>
+                <td style="padding:2px 6px;color:${t.side==='BUY'?'#4ade80':'#f87171'}">${t.side||''}</td>
+                <td style="padding:2px 6px;text-align:right;color:#94a3b8">${t.qty||''}</td>
+                <td style="padding:2px 6px;text-align:right;font-family:monospace;color:#94a3b8">${t.fill_price?'$'+Number(t.fill_price).toLocaleString('en-US',{maximumFractionDigits:2}):''}</td>
+                <td style="padding:2px 6px;text-align:right;font-family:monospace;font-weight:700;color:${(t.pnl||0)>=0?'#4ade80':'#f87171'}">${t.pnl!=null&&t.pnl!==0?(t.pnl>0?'+':'')+Number(t.pnl).toFixed(2):'—'}</td>
+              </tr>`).join('')}
+            </table>`;
+        } else {
+          html += `<div style="color:#4b5563;font-size:10px;margin-bottom:8px">No trades found for this session.</div>`;
+        }
+        // ── Session timeline ──
+        if (events.length) {
+          const evtTypeCol = {
+            window_open:              '#60a5fa',
+            price_watch:              '#c084fc',
+            ob_wait_start:            '#f59e0b',
+            ob_locked_during_window:  '#34d399',
+            ob_zone_used:             '#34d399',
+            trade_entered:            '#4ade80',
+            hedge_conditions:         '#86efac',
+            config_at_entry:          '#475569',
+            partial_booking:          '#fbbf24',
+            rebuy_set:                '#f97316',
+            rebuy_filled:             '#fb923c',
+            tp_hit:                   '#4ade80',
+            squareoff:                '#f87171',
+            verify_timeout:           '#f87171',
+            snapshot:                 '#1e3a5f',
+          };
+          html += `<div style="font-size:9px;font-weight:700;color:#475569;text-transform:uppercase;letter-spacing:.06em;margin-bottom:4px">Session Timeline</div>
+            <div style="display:flex;flex-direction:column;gap:3px">
+              ${events.map(e=>{
+                const ec = evtTypeCol[e.event_type] || '#6b7280';
+                return `<div style="display:flex;gap:8px;align-items:flex-start">
+                  <span style="font-family:monospace;font-size:9px;color:#4b5563;min-width:50px">${(e.event_ts_ist||'').substr(11,5)}</span>
+                  <span style="font-size:8px;font-weight:700;color:${ec};min-width:80px;text-transform:uppercase">${e.event_type}</span>
+                  <span style="font-size:9px;color:#6b7280;flex:1">${e.message||''}</span>
+                </div>`;
+              }).join('')}
+            </div>`;
+        } else {
+          html += `<div style="color:#4b5563;font-size:10px">No timeline events recorded for this session.</div>`;
+        }
+        inner.innerHTML = html;
+      } catch(e) {
+        inner.textContent = 'Error loading detail: ' + e;
+      }
     }
 
     function _fmtUsd(v) {
@@ -7903,6 +8180,7 @@ async function _updateSessionBanner() {
 .um-warn{background:#1c0a0a;border:1px solid #7f1d1d;border-radius:4px;padding:8px 12px;margin:8px 0;color:#fca5a5;font-size:11px}
 .um-ok{background:#052e16;border:1px solid #166534;border-radius:4px;padding:8px 12px;margin:8px 0;color:#86efac;font-size:11px}
 .um-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin:8px 0}
+.um-etag{display:inline-block;padding:1px 7px;border-radius:10px;font-size:9px;font-weight:700;font-family:monospace;margin:1px 2px}
 </style>
 
 <div style="font-size:20px;font-weight:bold;color:#f59e0b;margin-bottom:4px">&#128218; Hedge Trader &mdash; User Manual</div>
@@ -7913,193 +8191,262 @@ async function _updateSessionBanner() {
   <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:3px;font-size:10px;color:#60a5fa">
     <span>1. Platform Overview</span><span>2. Overview Tab</span><span>3. BTC Technicals</span>
     <span>4. Bullish Trader</span><span>5. Bearish Trader</span><span>6. Volatile Event Trader</span>
-    <span>7. Order Blocks</span><span>8. Virtual Accounts</span><span>9. Session Management</span>
-    <span>10. Key Calculations</span><span>11. Settings Reference</span><span>12. Tips &amp; Warnings</span>
+    <span>7. Order Blocks</span><span>8. Virtual Accounts</span><span>9. Session History &amp; Audit</span>
+    <span>10. Session Management</span><span>11. Key Calculations</span><span>12. Settings Reference</span>
+    <span>13. Tips &amp; Warnings</span><span></span><span></span>
   </div>
 </div>
 
 <div class="um-h1">1. Platform Overview</div>
-<div class="um-p">This is an automated <b style="color:#4ade80">paper trading platform</b> for Bitcoin (BTC). Three independent traders run simultaneously, each with a dedicated virtual $100,000 USDT balance. All orders are simulated against live Binance market data. No real money is involved.</div>
-<div class="um-box"><b style="color:#60a5fa">Core strategy &mdash; Hedge Trading:</b> Each trader identifies a key price level (Support or Resistance), then enters a directional futures position and simultaneously buys an options contract as downside insurance. The option limits losses if the trade moves against you.</div>
+<div class="um-p">An automated <b style="color:#4ade80">paper trading platform</b> for Bitcoin (BTC). Three independent traders run simultaneously, each with a $100,000 USDT virtual balance. All orders are simulated against live Binance data. No real money involved.</div>
+<div class="um-box"><b style="color:#60a5fa">Core strategy &mdash; Hedge Trading:</b> Each trader identifies an Order Block price zone, enters a directional futures position, and simultaneously buys an ITM option as insurance. The option limits losses if the trade moves against you while the futures leg captures the profit.</div>
 <div class="um-grid">
-  <div class="um-box" style="border-left-color:#4ade80"><b style="color:#4ade80">Bullish Trader</b><br>LONG Futures + ITM PUT hedge<br>Profits when BTC rises from support</div>
-  <div class="um-box" style="border-left-color:#f87171"><b style="color:#f87171">Bearish Trader</b><br>SHORT Futures + ITM CALL hedge<br>Profits when BTC falls from resistance</div>
-  <div class="um-box" style="border-left-color:#f59e0b"><b style="color:#f59e0b">Volatile Event Trader</b><br>PUT + CALL straddle around events<br>Profits from large moves in either direction</div>
-  <div class="um-box" style="border-left-color:#60a5fa"><b style="color:#60a5fa">Virtual Accounts</b><br>$100k USDT per trader, fully independent<br>Complete PnL tracking: realized, unrealized, equity</div>
+  <div class="um-box" style="border-left-color:#4ade80"><b style="color:#4ade80">Bullish Trader</b><br>LONG Futures + ITM PUT hedge<br>Profits when BTC rises from demand zone</div>
+  <div class="um-box" style="border-left-color:#f87171"><b style="color:#f87171">Bearish Trader</b><br>SHORT Futures + ITM CALL hedge<br>Profits when BTC falls from supply zone</div>
+  <div class="um-box" style="border-left-color:#f59e0b"><b style="color:#f59e0b">Volatile Event Trader</b><br>PUT + CALL straddle around macro events<br>Profits from large moves in either direction</div>
+  <div class="um-box" style="border-left-color:#60a5fa"><b style="color:#60a5fa">Virtual Accounts</b><br>$100k USDT per trader, fully independent<br>Full audit trail: trades, timeline, PnL history</div>
 </div>
 
 <div class="um-h1">2. Overview Tab</div>
 <div class="um-h2">BTC Spot Price</div>
-<div class="um-p">Current BTC price on Binance spot market. <b>Bid</b> = highest buy order. <b>Ask</b> = lowest sell order. Updated in real-time via WebSocket.</div>
+<div class="um-p">Live BTC/USDT price from Binance spot. <b>Bid</b> = best buy order. <b>Ask</b> = best sell order. Updated in real-time via WebSocket.</div>
 <div class="um-h2">BTC Futures Perpetual (USDT-M)</div>
-<div class="um-p"><b>Mark Price</b> is the fair value used for settlement and unrealized PnL &mdash; averaged across exchanges to prevent manipulation. <b>Premium</b> = (Futures &minus; Spot) / Spot &times; 100%. Positive = futures trading above spot (bullish market sentiment).</div>
+<div class="um-p"><b>Mark Price</b> = fair value averaged across exchanges, used for PnL settlement. <b>Premium</b> = (Futures &minus; Spot) / Spot &times; 100%. Positive premium = bullish market sentiment.</div>
 <div class="um-h2">Options Chain</div>
-<div class="um-p">Shows nearest ITM (in-the-money) CALL and PUT options. Key columns:</div>
 <div class="um-box">
   <b>Strike</b> &mdash; Price at which the option gives the right to buy/sell BTC<br>
-  <b>Bid / Ask</b> &mdash; Current market prices (Bid = where you sell, Ask = where you buy)<br>
-  <b>IV (Implied Volatility)</b> &mdash; Market expectation of future price movement; higher IV = more expensive options<br>
-  <b>Intrinsic Value</b> &mdash; PUT: max(Strike &minus; Spot, 0) &nbsp;&nbsp; CALL: max(Spot &minus; Strike, 0)<br>
-  <b>Time Value (TV)</b> &mdash; Ask &minus; Intrinsic; the extra premium you pay for time and volatility
+  <b>Bid / Ask</b> &mdash; Bid = where you sell, Ask = where you buy<br>
+  <b>IV</b> &mdash; Implied Volatility; higher IV = more expensive options<br>
+  <b>Intrinsic Value</b> &mdash; PUT: max(Strike &minus; Spot, 0) &nbsp; CALL: max(Spot &minus; Strike, 0)<br>
+  <b>Time Value (TV)</b> &mdash; Ask &minus; Intrinsic; extra premium for time and volatility
 </div>
 
 <div class="um-h1">3. BTC Technicals Tab</div>
-<div class="um-p">Live candlestick chart with Binance futures data. Each candle = Open / High / Low / Close for the selected timeframe (1m, 3m, 5m, 15m, 1h, 4h, 1d).</div>
-<div class="um-h2">Support and Resistance Lines</div>
-<div class="um-p">The Analyst agent runs daily at the configured time (default 18:00 IST). It detects price levels where BTC has repeatedly bounced, then draws them on the chart. Bull/Bear traders use these as their primary entry reference.</div>
-<div class="um-box" style="border-left-color:#4ade80"><b style="color:#4ade80">Green line</b> = Support &mdash; price has bounced upward from this level (Bull trader targets this)</div>
-<div class="um-box" style="border-left-color:#f87171"><b style="color:#f87171">Red line</b> = Resistance &mdash; price has reversed downward from this level (Bear trader targets this)</div>
+<div class="um-p">Live candlestick chart with Binance futures data. Timeframes: 1m, 3m, 5m, 15m, 1h, 4h, 1d. Analyst lines (Support/Resistance from the Analyst agent) are shown here as reference overlays, separate from the OB zones used for actual entries.</div>
 
 <div class="um-h1">4. Bullish Trader</div>
 <div class="um-h2">Strategy</div>
-<div class="um-p">Waits for BTC price to approach the nearest <b>Demand Order Block</b> (OB). When within the configured distance (max_distance_from_line pts), checks that all 4 option conditions are satisfied, then enters simultaneously:</div>
-<div class="um-box">1. <b>BUY ITM PUT option</b> &mdash; the hedge; profits if BTC drops (limits downside)<br>2. <b>BUY LONG Futures</b> &mdash; the trade; profits if BTC rises</div>
-<div class="um-h2">Workflow</div>
-<div class="um-ex">SLEEP &rarr; (window opens) &rarr; CHECK_ELIGIBILITY &rarr; (OB zone found) &rarr; VERIFY_HEDGE_LOOP &rarr; (all 4 pass) &rarr; EXECUTE &rarr; MANAGING_POSITION &rarr; (target hit) &rarr; SLEEP</div>
+<div class="um-p">At window open, fetches the nearest <b>Demand Order Block</b> (OB zone where price previously bounced up sharply). Locks the zone mid as the target line. Waits for price to approach within <b>max_distance_from_line</b> pts, then runs the 4-condition hedge verification loop every second until all conditions pass simultaneously.</div>
+<div class="um-box">Entry executes simultaneously:<br>
+  1. <b>BUY ITM PUT option</b> &mdash; the hedge (profits if BTC drops)<br>
+  2. <b>BUY LONG Futures</b> &mdash; the directional trade (profits if BTC rises)</div>
+<div class="um-h2">Full Workflow</div>
+<div class="um-ex">SLEEP
+  &rarr; window opens &rarr; CHECK_ELIGIBILITY
+  &rarr; OB zone found and locked &rarr; VERIFY_HEDGE_LOOP (runs every 1s)
+  &rarr; all 4 conditions pass &rarr; EXECUTE
+  &rarr; MANAGING_POSITION
+     &rarr; partial booking trigger hit &rarr; PARTIAL_BOOKING &rarr; back to MANAGING
+     &rarr; rebuy limit fills &rarr; MANAGING (updated avg)
+     &rarr; session target hit &rarr; futures closed &rarr; SLEEP (hedge held)
+  &rarr; squareoff time &rarr; FORCE_CLOSE &rarr; SLEEP</div>
 <div class="um-h2">4 Entry Conditions (all must pass at the same instant)</div>
 <div class="um-box">
-  1. <b>Proximity</b>: Mark price within &plusmn;max_distance_from_line pts of the OB mid<br>
+  1. <b>Proximity</b>: Mark price within &plusmn;max_distance_from_line pts of OB mid<br>
   2. <b>Premium</b>: PUT ask &le; max_premium USDT<br>
-  3. <b>Time Value</b>: PUT TV &le; max_time_value USDT (not overpaying for time)<br>
-  4. <b>Spread</b>: |Ask &minus; Mark| / Mark &le; price_diff_percent% (liquid, tight market)
+  3. <b>Time Value</b>: PUT TV &le; max_time_value USDT<br>
+  4. <b>Spread</b>: |Ask &minus; Mark| / Mark &le; price_diff_percent% (option is liquid)
 </div>
 <div class="um-h2">Exit Logic</div>
 <div class="um-box">
-  <b>Partial Close</b>: Futures PnL &ge; premium &times; partial_profit_ratio &rarr; sell 50% futures, place rebuy limit<br>
-  <b>Full Close</b>: Session futures PnL &ge; session_pnl_target &rarr; close all futures (option held until squareoff)<br>
-  <b>Force Close</b>: At force_close_h:m IST &rarr; sell most-profitable leg first, then the other
+  <b>Partial Booking</b>: Futures PnL &ge; premium &times; partial_profit_ratio &rarr; sell 50% futures, set rebuy limit at avg &minus; 2&times;TV<br>
+  <b>Rebuy Fill</b>: When price crosses the rebuy limit, the 50% is bought back at the lower level (lowers avg cost)<br>
+  <b>Full Close (TP)</b>: Session futures PnL &ge; session_pnl_target &rarr; close all futures; option kept until squareoff<br>
+  <b>Squareoff</b>: At force_close time &rarr; sell profitable leg first, then the other
 </div>
 <div class="um-h2">Example</div>
-<div class="um-ex">BTC mark price = $72,500. Nearest demand OB mid = $72,400 (distance = 100 pts, within tolerance).
-Nearest ITM PUT: strike $73,000, ask $320, intrinsic = $73,000 - $72,500 = $500, TV = $320 - $500 = negative (deep ITM, TV = 0).
-All 4 conditions pass &rarr; BUY PUT @ $320 + BUY 1 BTC LONG futures @ $72,500.
-BTC rises to $73,200. Futures PnL = (73,200 - 72,500) &times; 1 = +$700. Session target = $600. Full close fires.
-Net profit = $700 (futures) - $320 (premium cost) = +$380 USDT.</div>
+<div class="um-ex">BTC = $72,500. Demand OB mid = $72,400 (100 pts away, within tolerance).
+ITM PUT: strike=$73,000, ask=$320, TV=0 (deep ITM). All 4 conditions pass.
+Entry: BUY PUT @ $320 + BUY 1 BTC LONG @ $72,500. Session target = $600.
+BTC rises &rarr; $73,200. Futures PnL = (73,200 - 72,500) &times; 1 = +$700 &ge; $600. Full close fires.
+Net = $700 (futures) - $320 (premium) = +$380 USDT.</div>
 
 <div class="um-h1">5. Bearish Trader</div>
-<div class="um-p">Mirror of the Bullish trader &mdash; watches the nearest <b>Supply Order Block</b>.</div>
+<div class="um-p">Mirror of Bullish &mdash; uses nearest <b>Supply OB</b> (zone where price reversed sharply downward).</div>
 <div class="um-box">1. <b>BUY ITM CALL option</b> &mdash; hedges against an upward spike<br>2. <b>SELL SHORT Futures</b> &mdash; profits if BTC falls</div>
 <div class="um-h2">Example</div>
-<div class="um-ex">BTC = $74,800. Supply OB mid = $75,000 (distance = 200 pts, within tolerance).
-Nearest ITM CALL: strike $74,000, spot $74,800, intrinsic = $74,800 - $74,000 = $800. Ask = $950, TV = $150.
-BUY CALL @ $950 + SHORT 1 BTC futures @ $74,800.
-BTC drops to $73,200. Futures PnL = (74,800 - 73,200) &times; 1 = +$1,600. Target hit.
-Net profit = $1,600 - $950 = +$650 USDT.</div>
+<div class="um-ex">BTC = $74,800. Supply OB mid = $75,000 (200 pts, within tolerance).
+ITM CALL: strike=$74,000, intrinsic=$800, ask=$950, TV=$150.
+Entry: BUY CALL @ $950 + SHORT 1 BTC @ $74,800.
+BTC drops &rarr; $73,200. Futures PnL = (74,800 - 73,200) &times; 1 = +$1,600 &ge; target. Full close.
+Net = $1,600 - $950 = +$650 USDT.</div>
 
 <div class="um-h1">6. Volatile Event Trader</div>
 <div class="um-h2">Options Straddle Strategy</div>
-<div class="um-p">Designed for high-impact macro events (FOMC, CPI, etc.) where a large BTC move is expected but direction is unknown. Buys both a PUT and a CALL simultaneously. Profits if BTC moves significantly in either direction.</div>
+<div class="um-p">Designed for high-impact macro events (FOMC, CPI, NFP) where a large BTC move is expected but direction is unknown. Buys both PUT and CALL simultaneously.</div>
 <div class="um-box">
   <b>Entry &mdash; Strict ITM Pair:</b><br>
-  &bull; PUT strike &gt; current spot &gt; CALL strike (both options are in-the-money)<br>
-  &bull; PUT strike &minus; CALL strike &asymp; configured gap (&plusmn; tolerance, default 500 pts &plusmn; 50 pts)<br>
-  &bull; Combined ask (PUT + CALL) &le; combined_premium_max<br>
-  &bull; Each leg ask quantity &ge; min_ask_qty
+  &bull; PUT strike &gt; spot &gt; CALL strike (both ITM)<br>
+  &bull; PUT strike &minus; CALL strike &asymp; vol_strike_gap (&plusmn; tolerance)<br>
+  &bull; Combined ask &le; vol_combined_premium_max<br>
+  &bull; Each leg ask qty &ge; vol_min_ask_qty
 </div>
 <div class="um-h2">How to Use</div>
-<div class="um-p">Add an event in the Volatile Event tab with its name and exact IST timestamp. The trader begins searching for a qualifying straddle when the event time arrives. The search window closes at the configured hour next morning (default 06:00 IST). If a valid pair is found, it enters and monitors both legs.</div>
-<div class="um-h2">Take Profit</div>
-<div class="um-ex">TP per leg = (PUT_ask + CALL_ask) &times; tp_multiplier
-Example: PUT = $620, CALL = $390, combined = $1,010, tp_multiplier = 1.10
-TP = $1,010 &times; 1.10 = $1,111 per leg
-When bid on PUT or CALL &ge; $1,111 &rarr; that leg is sold at market.</div>
+<div class="um-p">In the Volatile Event tab, add an event with its name and exact IST timestamp. The trader begins searching at that time. Window closes at vol_window_close_h next morning. Once a valid straddle is found, it enters and monitors both legs independently.</div>
+<div class="um-ex">TP per leg = (put_ask + call_ask) &times; vol_tp_multiplier
+Example: PUT=$620, CALL=$390, combined=$1,010, multiplier=1.10
+TP = $1,111 per leg. When best_bid &ge; $1,111 on either leg &rarr; sold.</div>
 
 <div class="um-h1">7. Order Blocks Tab</div>
-<div class="um-p">Detects institutional order blocks (OB) &mdash; price zones where large orders caused a sharp price reversal. These are the primary entry reference for Bull/Bear traders.</div>
+<div class="um-p">Detects institutional order blocks &mdash; zones where large orders created a sharp displacement (fast move away). These zones are the primary entry reference for Bull/Bear traders, refreshed every trading session.</div>
 <div class="um-box">
-  <b>Demand OB</b> (green) &mdash; Price fell into this zone then reversed sharply upward. Bull trader enters near the nearest demand OB.<br>
-  <b>Supply OB</b> (red) &mdash; Price rose into this zone then reversed sharply downward. Bear trader enters near the nearest supply OB.
+  <b>Demand OB</b> (green band) &mdash; Price dropped into zone then reversed sharply UP. Bull trader locks nearest demand OB at window open.<br>
+  <b>Supply OB</b> (red band) &mdash; Price rose into zone then reversed sharply DOWN. Bear trader locks nearest supply OB at window open.
 </div>
-<div class="um-h2">Quality Grades</div>
-<div class="um-ex">A+  score &ge; 86  Very strong: large displacement, fresh, close to current price
+<div class="um-h2">Quality Grades (score 0&ndash;100)</div>
+<div class="um-ex">A+  score &ge; 86  Very strong: large displacement, fresh zone, tight price proximity
 A   score &ge; 74  Strong zone
-B   score &ge; 58  Valid zone (minimum threshold used by traders)</div>
-<div class="um-p">At each window open, the trader fetches the nearest qualifying OB, locks its midpoint as the entry reference, and displays the zone on the mini-chart. The zone stays locked for the rest of that session.</div>
+B   score &ge; 58  Valid — minimum threshold accepted by traders
+C/D score &lt; 58  Weak zones — ignored by traders</div>
+<div class="um-box">Score = move_size(42%) + compactness(24%) + volume(18%) + close_position(16%)</div>
+<div class="um-p">At window open, the trader locks the nearest qualifying OB's midpoint as the <b>target line</b> for the entire session. If no zone exists yet, the trader enters OB Wait Mode and checks every new candle close.</div>
 
 <div class="um-h1">8. Virtual Accounts Tab</div>
-<div class="um-p">Unified view of all 3 traders' paper accounts with complete financial data, updated every 10 seconds.</div>
-<div class="um-h2">PnL Breakdown</div>
+<div class="um-p">Unified view of all 3 traders. Refresh button top-right reloads all data. Auto-refreshes every 10 seconds.</div>
+<div class="um-h2">Stats Bar</div>
 <div class="um-box">
-  <b>Balance</b> &mdash; Cash after option premiums paid and futures PnL settled. Starts at $100,000.<br>
-  <b>Unrealized PnL</b> &mdash; How much open positions have moved: options MTM change + futures MTM.<br>
-  <b>Equity</b> &mdash; Balance + current market value of open options + futures MTM = total account value.<br>
-  <b>Realized PnL</b> &mdash; Gains/losses from <b>closed</b> positions only (sold options + closed futures).<br>
-  <b>Total PnL</b> &mdash; Equity &minus; $100,000 = complete picture (Realized + Unrealized).
+  <b>Balance</b> &mdash; Cash: starts at $100k, decreases by premiums paid, increases when positions close with profit<br>
+  <b>Equity</b> &mdash; Balance + open option market value + futures mark-to-market (total account value right now)<br>
+  <b>MKT Value</b> &mdash; Current market value of open option contracts<br>
+  <b>Unrealized PnL</b> &mdash; Combined futures MTM + option MTM change on open positions<br>
+  <b>Realized PnL</b> &mdash; Gains/losses from closed positions only<br>
+  <b>Total PnL</b> &mdash; Equity &minus; $100,000 (complete picture)
 </div>
-<div class="um-ok">Buying an option is capital deployment, not a realized loss. The premium paid appears in your Balance (cash is lower), but Realized PnL stays $0 until the option is sold. Total PnL shows the full change including current option market value.</div>
-<div class="um-h2">Trade Log Views</div>
+<div class="um-ok">Buying an option is capital deployment, not an instant loss. The $320 premium reduces your Balance, but Realized PnL stays $0 until the option is sold. Total PnL reflects the option's current market value.</div>
+<div class="um-h2">Three View Tabs per Trader</div>
 <div class="um-box">
-  <b>Live</b> &mdash; Current server session trades (in-memory, real-time, exact execution timestamps)<br>
-  <b>History</b> &mdash; All trades from the database (persists across restarts, exact execution timestamps)<br>
-  <b>Sessions</b> &mdash; Completed trading sessions with entry/close times and net PnL
+  <b>Live Trades</b> &mdash; In-memory trades from the current server session. Clears on server restart.<br>
+  <b>Full History</b> &mdash; All trades from the DB, grouped by session. Persists across restarts. Shows entry trades labeled "entry" and close trades with PnL.<br>
+  <b>Session Log</b> &mdash; Every session ever recorded, including days where <b>no trade was taken</b>. Click any row to expand trades + full timeline.
 </div>
 
-<div class="um-h1">9. Session Management</div>
+<div class="um-h1">9. Session History &amp; Audit Trail</div>
+<div class="um-p">The Session Log gives a complete post-session audit. Two types of sessions appear:</div>
+<div class="um-grid">
+  <div class="um-box" style="border-left-color:#4ade80"><b style="color:#4ade80">SQUAREOFF</b> &mdash; Trade happened, all positions closed at squareoff. Shows Fut PnL + Hedge PnL + Total PnL + balance before/after.</div>
+  <div class="um-box" style="border-left-color:#475569"><b style="color:#94a3b8">NO TRADE</b> &mdash; Window opened, OB zone was found (or not), but price never met all 4 conditions. No money moved. Full timeline still recorded.</div>
+</div>
+<div class="um-h2">Session Detail (click any row to expand)</div>
+<div class="um-p">Each session row expands to show two sections:</div>
+<div class="um-box">
+  <b>Trades table</b> &mdash; Every order with timestamp, symbol, side, fill price, and PnL<br>
+  <b>Session Timeline</b> &mdash; Chronological log of every key decision, colour-coded by event type
+</div>
+<div class="um-h2">Timeline Event Types</div>
+<div style="margin:8px 0">
+  <span class="um-etag" style="background:#1e3a5f;color:#60a5fa">WINDOW_OPEN</span> Window opened, OB analysis ran. Shows direction, timeframe, price.<br><br>
+  <span class="um-etag" style="background:#1a1a2e;color:#34d399">OB_ZONE_USED</span> The exact OB zone locked for this session: grade, score, age, top/bottom/mid, distance from price.<br><br>
+  <span class="um-etag" style="background:#1a1a2e;color:#c084fc">PRICE_WATCH</span> OB zone locked but price is too far. Shows zone mid, current distance, required proximity.<br><br>
+  <span class="um-etag" style="background:#1a1a2e;color:#86efac">HEDGE_CONDITIONS</span> The exact values of all 4 conditions at the moment they all passed: premium, TV, intrinsic, spread, proximity.<br><br>
+  <span class="um-etag" style="background:#1a1a2e;color:#475569">CONFIG_AT_ENTRY</span> Snapshot of all key parameters active at the moment of trade entry. Audit record &mdash; does not change if settings are later modified.<br><br>
+  <span class="um-etag" style="background:#1a1a2e;color:#4ade80">TRADE_ENTERED</span> Trade confirmed. Hedge symbol, entry price, premium paid.<br><br>
+  <span class="um-etag" style="background:#1a1a2e;color:#fbbf24">PARTIAL_BOOKING</span> 50% of futures sold. Shows sell price, realized PnL, remaining qty.<br><br>
+  <span class="um-etag" style="background:#1a1a2e;color:#f97316">REBUY_SET</span> Rebuy limit order placed after partial sell. Shows limit price and qty.<br><br>
+  <span class="um-etag" style="background:#1a1a2e;color:#fb923c">REBUY_FILLED</span> Rebuy limit order triggered. Shows new average cost and updated full-close target price.<br><br>
+  <span class="um-etag" style="background:#1a1a2e;color:#4ade80">TP_HIT</span> Session target reached. Futures closed. Shows futures PnL, peak unrealized PnL reached during the trade, trough (worst drawdown), balance.<br><br>
+  <span class="um-etag" style="background:#1a1a2e;color:#f87171">SQUAREOFF</span> End-of-day close. Shows: fut PnL, hedge PnL, total PnL, <b>peak PnL</b> (best the trade ever looked), <b>trough PnL</b> (worst it looked), balance after.<br><br>
+  <span class="um-etag" style="background:#1a1a2e;color:#f87171">VERIFY_TIMEOUT</span> Verify loop ran but conditions never all passed within the timeout. Shows: total iterations run, last fail reason, per-condition fail counts (how many times each condition blocked entry).<br><br>
+  <span class="um-etag" style="background:#1a1a2e;color:#1e3a5f">SNAPSHOT</span> Periodic state snapshot (every 5 minutes) &mdash; shows state, price, eligibility status.
+</div>
+<div class="um-h2">Reading a VERIFY_TIMEOUT Event</div>
+<div class="um-ex">verify_timeout: elapsed=1800s iterations=1821
+  last_fail=[prem(920>max=800) | tv(45>max=30)]
+  prox=0 prem=847 tv=1621 spread=12 no_itm=0</div>
+<div class="um-p">This means: the verify loop ran 1821 times over 30 minutes. Price was always within proximity (prox=0 failures). Premium was too high 847 times, TV too high 1621 times. Conclusion: the option was simply too expensive that day &mdash; consider raising max_premium or max_time_value.</div>
+<div class="um-h2">Full History Tab &mdash; Grouped View</div>
+<div class="um-p">The Full History tab groups all trades by session. Each session block shows a header with the session ID and that session's net PnL. Entry trades show "entry" (PnL = 0 at entry time). Close trades show their realized PnL in green/red.</div>
+<div class="um-h2">Balance Tracking Per Session</div>
+<div class="um-p">Each session row in Session Log shows: <b>bal $100000&rarr;$99989</b> &mdash; the account balance at trade entry and after all positions closed. This lets you track exactly how much each session impacted the account, independent of any other trader.</div>
+
+<div class="um-h1">10. Session Management</div>
 <div class="um-h2">Trading Window</div>
-<div class="um-p">Each trader searches for entries only during its configured window (trade_start to trade_end IST). Outside the window, state = SLEEP. At force_close time, any open position is automatically closed.</div>
-<div class="um-h2">Session Boundaries</div>
-<div class="um-p">Binance options expire daily at 13:30 IST. A "session" runs 13:31 IST to 13:30 IST the next day. A window of 16:00&rarr;02:00 is fully valid &mdash; both times are within the same session. The blue banner at the top always shows the current session.</div>
+<div class="um-p">Each trader is active only between <b>trade_start</b> and <b>trade_end</b> (IST). State = SLEEP outside the window. At <b>force_close</b> time, all open positions are automatically squared off.</div>
+<div class="um-h2">Session Boundaries (cross-midnight)</div>
+<div class="um-p">Binance options expire at 13:30 IST daily. A "session" runs 13:31 IST &rarr; 13:30 IST next day. A configured window of 16:00&rarr;02:00 is fully valid (both are in the same options expiry session). The session banner at the top always shows the current session range.</div>
+<div class="um-h2">OB Wait Mode</div>
+<div class="um-p">If no qualifying OB zone exists when the window opens, the trader enters OB Wait Mode. It stays SLEEP and rescans every candle close on its OB timeframe. The moment a valid zone forms, it locks it and proceeds to eligibility check. This is logged as <span class="um-tag">OB_WAIT_START</span> and <span class="um-tag">OB_LOCKED_DURING_WINDOW</span> in the timeline.</div>
 <div class="um-h2">Calendar and Blackout Dates</div>
-<div class="um-p">Each Bull/Bear trader has a Trading Calendar inside its Settings panel. Toggle weekends off, or click specific dates to mark them as blackout days. The trader will skip those days entirely (stays SLEEP).</div>
+<div class="um-p">Each Bull/Bear trader has a Trading Calendar in its Settings panel. Toggle weekends off, or click specific dates to mark them as blackout days. The trader will stay SLEEP on those days.</div>
 <div class="um-h2">Clear Memory</div>
-<div class="um-warn">Clear Memory will: (1) close all open positions without sending orders, (2) delete the full trade history from the database, (3) reset the virtual balance to $100,000. This is permanent and cannot be undone.</div>
-<div class="um-h2">Force Close</div>
-<div class="um-p">Manually triggers end-of-day squareoff. Sells the more profitable leg first, then the other. The session is marked "force-closed" and will not appear in the journal history. Only naturally completed sessions are recorded.</div>
+<div class="um-warn">Clear Memory: (1) closes all open positions immediately without market orders, (2) deletes all trade history and session records from the database, (3) resets virtual balance to $100,000. Irreversible.</div>
+<div class="um-h2">Force Close (Manual Squareoff)</div>
+<div class="um-p">Manually triggers squareoff immediately. Sells the more profitable leg first (to lock in gains), then the other. The session record and all trades are saved to the database and will appear in Session Log just like an automatic squareoff.</div>
 
-<div class="um-h1">10. Key Calculations</div>
+<div class="um-h1">11. Key Calculations</div>
 <div class="um-h2">Intrinsic Value</div>
-<div class="um-ex">PUT intrinsic  = max(Strike - Spot, 0)    e.g. Strike=$74,000, Spot=$73,500  &rarr;  $500
-CALL intrinsic = max(Spot - Strike, 0)    e.g. Strike=$72,000, Spot=$73,500  &rarr;  $1,500</div>
+<div class="um-ex">PUT:  intrinsic = max(Strike - Spot, 0)   e.g. Strike=$74,000, Spot=$73,500 &rarr; $500
+CALL: intrinsic = max(Spot - Strike, 0)   e.g. Strike=$72,000, Spot=$73,500 &rarr; $1,500</div>
 <div class="um-h2">Time Value</div>
-<div class="um-ex">Time Value = Ask - Intrinsic
-Example: Ask=$650, Intrinsic=$500  &rarr;  TV=$150  (you pay $150 for time and implied volatility)</div>
+<div class="um-ex">TV = Ask - Intrinsic
+Example: Ask=$650, Intrinsic=$500 &rarr; TV=$150 (you pay $150 purely for remaining time and IV)</div>
 <div class="um-h2">Futures Unrealized PnL</div>
-<div class="um-ex">LONG:   PnL = (Current Mark - Entry Price) &times; Qty    e.g. (73,200 - 72,500) &times; 1 = +$700
-SHORT:  PnL = (Entry Price - Current Mark) &times; Qty    e.g. (74,800 - 73,200) &times; 1 = +$1,600</div>
+<div class="um-ex">LONG:  PnL = (Current Mark - Entry) &times; Qty    e.g. (73,200 - 72,500) &times; 1 = +$700
+SHORT: PnL = (Entry - Current Mark) &times; Qty    e.g. (74,800 - 73,200) &times; 1 = +$1,600</div>
 <div class="um-h2">Partial Booking Trigger Price</div>
-<div class="um-ex">LONG trigger  = Entry + (premium_paid &times; partial_ratio) / qty
+<div class="um-ex">LONG trigger  = Entry + (premium &times; partial_ratio) / qty
 Example: Entry=$72,500, premium=$320, ratio=1.10, qty=1
-Trigger = $72,500 + ($352 / 1) = $72,852
-When futures price reaches $72,852 &rarr; sell 50% of the position.</div>
-<div class="um-h2">Rebuy After Partial</div>
-<div class="um-ex">After the 50% partial sell, a limit rebuy is placed at:
-  LONG  rebuy = avg_entry - (2 &times; time_value)    [buys the dip, lowers average cost]
-  SHORT rebuy = avg_entry + (2 &times; time_value)
-  This reduces the effective average entry and lowers the full-close target price.</div>
+Trigger price = $72,500 + $352 = $72,852
+When futures mark reaches $72,852 &rarr; 50% of position sold.</div>
+<div class="um-h2">Rebuy Limit After Partial</div>
+<div class="um-ex">LONG  rebuy = avg_entry - (2 &times; TV_at_entry)   [buys dip, lowers avg cost]
+SHORT rebuy = avg_entry + (2 &times; TV_at_entry)
+Effect: new avg = old avg - TV. Full-close target price recalculated from new avg.
+Example: avg=$72,500, TV=$84 &rarr; rebuy limit @ $72,500 - $168 = $72,332</div>
+<div class="um-h2">Peak and Trough PnL</div>
+<div class="um-ex">Peak PnL   = highest combined (futures + hedge) unrealized PnL reached during the trade
+Trough PnL = lowest combined unrealized PnL (worst drawdown moment)
+Both tracked in real-time and logged at TP hit and squareoff.
+Example: peak=+$420 means the trade looked like a $420 gain at its best point.
+         trough=-$60 means at worst the trade was $60 underwater.</div>
 <div class="um-h2">Equity Formula</div>
-<div class="um-ex">Equity = Cash Balance + Current Option Market Value + Futures Unrealized PnL
-Cash Balance = $100k - premiums paid + option sale proceeds + realized futures PnL</div>
+<div class="um-ex">Equity = Balance + Open Option Mark Value + Futures Unrealized PnL
+Balance = $100k - premiums paid + option proceeds + realized futures PnL</div>
 
-<div class="um-h1">11. Settings Reference</div>
+<div class="um-h1">12. Settings Reference</div>
 <div class="um-h2">Time Window</div>
 <div class="um-box">
-  <b>trade_start_h/m</b> &mdash; Window open time (IST). Trader activates and begins analysis.<br>
-  <b>trade_end_h/m</b> &mdash; Window close time. No new entries allowed after this.<br>
-  <b>force_close_h/m</b> &mdash; Hard stop time. All open positions closed at this time regardless.<br>
-  <i>Times are session-aware: a window of 16:00&rarr;02:00 is valid (spans midnight within same options session).</i>
+  <b>trade_start_h/m</b> &mdash; Window open (IST). OB analysis runs, trader activates.<br>
+  <b>trade_end_h/m</b> &mdash; No new entries after this time.<br>
+  <b>force_close_h/m</b> &mdash; Hard stop: all positions closed at this time regardless of PnL.<br>
+  <i>Session-aware: 16:00&rarr;02:00 is valid (spans midnight within the same expiry session).</i>
+</div>
+<div class="um-h2">Order Block Settings</div>
+<div class="um-box">
+  <b>ob_tf</b> &mdash; Timeframe for OB detection (e.g. 15m, 1h, 4h). Larger TF = fewer, stronger zones.<br>
+  <b>ob_candle_count</b> &mdash; History depth for OB scan. More candles = older zones visible.<br>
+  <b>ob_pivot_length</b> &mdash; Bars each side for pivot detection (default 5). Higher = stricter pivots.<br>
+  <b>ob_displacement_atr</b> &mdash; Min ATR-normalised move to qualify a zone (default 0.62).<br>
+  <b>ob_max_thickness_atr</b> &mdash; Max zone height in ATR units (default 1.65).<br>
+  <b>ob_sensitivity</b> &mdash; Conservative / Balanced / Aggressive (adjusts displacement threshold ±24%).
 </div>
 <div class="um-h2">Entry Thresholds</div>
 <div class="um-box">
-  <b>max_premium</b> &mdash; Maximum option ask in USDT. Higher = accepts more expensive options.<br>
-  <b>max_time_value</b> &mdash; Maximum TV allowed. Lower = only deep ITM options with minimal theta decay.<br>
-  <b>price_diff_percent</b> &mdash; Maximum ask/mark spread %. Lower = requires more liquid options.<br>
-  <b>max_distance_from_line</b> &mdash; Maximum distance (pts) from the OB mid before options are checked.
+  <b>max_distance_from_line</b> &mdash; Max pts from OB mid before checking options (proximity filter).<br>
+  <b>max_premium</b> &mdash; Max option ask in USDT. Higher = accepts pricier options.<br>
+  <b>max_time_value</b> &mdash; Max TV. Lower = only deep ITM options with minimal theta decay.<br>
+  <b>price_diff_percent</b> &mdash; Max ask/mark spread %. Lower = requires more liquid options.
 </div>
 <div class="um-h2">Risk and Profit</div>
 <div class="um-box">
-  <b>session_pnl_target</b> &mdash; Futures PnL target to close the session (default $600).<br>
-  <b>partial_profit_ratio</b> &mdash; Futures PnL &divide; premium at which 50% is booked (default 1.10).<br>
-  <b>contract_qty</b> &mdash; BTC contracts per trade (default 1.0 = 1 BTC futures + 1 options contract).
+  <b>session_pnl_target</b> &mdash; Futures PnL at which full close fires (default $600).<br>
+  <b>partial_profit_ratio</b> &mdash; Futures PnL / premium trigger for 50% booking (default 1.10).<br>
+  <b>contract_qty</b> &mdash; BTC contracts per trade (default 1.0).
+</div>
+<div class="um-h2">Verify Hedge Timeout</div>
+<div class="um-box">
+  <b>verify_hedge_timeout_sec</b> &mdash; How long (seconds) the verify loop runs before giving up. If all 4 conditions never pass within this window, trader resets to SLEEP. Timeout details are logged in Session Log under the <span class="um-tag">VERIFY_TIMEOUT</span> event.
 </div>
 
-<div class="um-h1">12. Tips and Warnings</div>
-<div class="um-ok">&#10003; The platform is fully automated during the trading window. The System Log on the Overview tab and each trader's inline log show all decisions in real time.</div>
-<div class="um-ok">&#10003; The Accounts tab refreshes every 10 seconds. Use it to monitor all 3 traders at once without switching tabs.</div>
-<div class="um-ok">&#10003; Settings take effect immediately &mdash; no restart needed. All settings are saved to the database and restored after a server restart.</div>
-<div class="um-warn">&#9888; Force Close marks the session as force-closed. It will not appear in the session journal. Only sessions that complete naturally (by hitting the profit target or squareoff time) are recorded.</div>
-<div class="um-warn">&#9888; If a trader shows "ANALYZING" status, it is fetching live candle data to detect Order Block zones. Do not change analysis settings during this phase.</div>
-<div class="um-warn">&#9888; Options expire at 13:30 IST daily. Any position still open at expiry will expire worthless. Always set force_close time comfortably before 13:30 IST.</div>
-<div class="um-warn">&#9888; The session banner shows "EXPIRY IN 13:30" &mdash; this means the current option expiry time, not a countdown. All option positions must be closed before this time.</div>
+<div class="um-h1">13. Tips and Warnings</div>
+<div class="um-ok">&#10003; All decisions are visible in real time. Each trader card has an inline log. The System Log on the Overview tab shows platform-wide events. Session Log records every decision permanently.</div>
+<div class="um-ok">&#10003; Settings take effect immediately &mdash; no restart needed. All settings survive server restarts.</div>
+<div class="um-ok">&#10003; If VERIFY_TIMEOUT keeps firing, open the Session Log, click the NO-TRADE session, and read the VERIFY_TIMEOUT event. It shows exactly which condition blocked entry and how many times. Adjust max_premium or max_time_value accordingly.</div>
+<div class="um-ok">&#10003; The Full History tab groups trades by session. Each session block header shows the net PnL for that session so you can identify profitable vs losing sessions at a glance.</div>
+<div class="um-warn">&#9888; If a trader shows "ANALYZING" status, it is fetching live candle data for OB detection. Do not change OB settings during this phase.</div>
+<div class="um-warn">&#9888; Options expire at 13:30 IST daily. Positions not closed before expiry expire worthless. Always set force_close_h/m well before 13:30 IST (e.g., 12:30 IST provides a 1-hour safety buffer).</div>
+<div class="um-warn">&#9888; Clear Memory is irreversible. It deletes all trade history, session records, and resets the balance. Use only when you want a completely fresh start.</div>
+<div class="um-warn">&#9888; Peak PnL in the squareoff event shows the best the trade looked during its life. If peak was +$400 but final was -$10, the trade was profitable at some point &mdash; consider adjusting session_pnl_target or enabling partial booking earlier.</div>
+<div class="um-warn">&#9888; The session banner shows "EXPIRY IN | HH:MM" &mdash; this is the remaining time until the current daily option expiry (13:30 IST). Ensure force_close fires before this time.</div>
 
 <div style="margin-top:24px;padding-top:12px;border-top:1px solid #1a2540;font-size:9px;color:#1f2937;text-align:center">
   BTC Hedge Platform &mdash; Paper Trading Only &mdash; No Real Money at Risk
@@ -8134,6 +8481,11 @@ Cash Balance = $100k - premiums paid + option sale proceeds + realized futures P
     setInterval(() => { if (activeTab === 3) loadFwd(); }, 5000);
     setInterval(() => { if (activeTab === 5 && _obData) _fetchObData(_obCurrentTF); }, 30000);
     setInterval(() => { if (activeTab === 7) _loadAllAccounts(); }, 10000);
+    // Refresh countdown badges in trader headers every 30s (so timers tick between WS events)
+    setInterval(() => {
+      if (activeTab === 2 && _traderInited['bull']) _updateTraderLive('bull', TRADER_CFG['bull']);
+      if (activeTab === 3 && _traderInited['bear']) _updateTraderLive('bear', TRADER_CFG['bear']);
+    }, 30000);
     // Analyst chart is kept live by ANALYST_LINES + CANDLE_CLOSE WebSocket events — no polling needed
     // Load virtual balances at startup
     setTimeout(() => {
@@ -8189,9 +8541,20 @@ Cash Balance = $100k - premiums paid + option sale proceeds + realized futures P
             '<span style="font-size:10px;color:#6b7280">B: <b style="color:#4ade80" id="ob-bg">—</b></span>' +
             '<span style="font-size:10px;color:#6b7280">Price: <b style="color:#f59e0b" id="ob-cp">—</b></span>' +
           '</div>' +
-          '<div id="ob-chart" style="flex:1;min-height:340px"></div>' +
-          '<div style="flex-shrink:0;padding:8px 12px;background:#0a0a14;border-top:1px solid #1f2937;overflow-y:auto;max-height:280px">' +
+          '<div id="ob-chart" style="flex:1;min-height:280px"></div>' +
+          '<div style="flex-shrink:0;padding:8px 12px;background:#0a0a14;border-top:1px solid #1f2937;overflow-y:auto;max-height:220px">' +
             '<div id="ob-table"></div>' +
+          '</div>' +
+          '<div style="flex-shrink:0;border-top:2px solid #1a2540;background:#050a14">' +
+            '<div style="padding:5px 12px 3px;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:4px">' +
+              '<span style="font-size:9px;font-weight:700;color:#475569;text-transform:uppercase;letter-spacing:.06em">Zone Lifecycle History</span>' +
+              '<div style="display:flex;gap:4px;align-items:center">' +
+                '<span style="font-size:8px;color:#4b5563">TF:</span>' +
+                ['5m','15m','1h','4h'].map(t => `<button id="obzl-tf-${t}" onclick="_obzlSetTF('${t}')" style="font-size:8px;padding:1px 7px;border-radius:3px;cursor:pointer;border:1px solid #374151;background:transparent;color:#6b7280">${t}</button>`).join('') +
+                '<button onclick="_obzlLoad()" style="font-size:8px;padding:1px 7px;background:#1e3a5f;border:1px solid #1e40af;border-radius:3px;color:#93c5fd;cursor:pointer;margin-left:4px">↻</button>' +
+              '</div>' +
+            '</div>' +
+            '<div id="ob-zone-lifecycle" style="padding:0 12px 8px;max-height:240px;overflow-y:auto"></div>' +
           '</div>';
         _buildObChart();
       }
@@ -8439,6 +8802,108 @@ Cash Balance = $100k - premiums paid + option sale proceeds + realized futures P
         </div>` +
         _zoneCard(nearDemand, true) +
         _zoneCard(nearSupply, true);
+
+      // ── Trigger lifecycle panel load on first render ─────────────────────
+      const lcEl = el('ob-zone-lifecycle');
+      if (lcEl && !lcEl.dataset.loaded) _obzlLoad();
+    }
+
+    // ── OB Zone Lifecycle (correct implementation) ────────────────────────
+    let _obzlTF   = '';   // '' = follow ob chart TF; else explicit selection
+    let _obzlData = [];
+
+    function _obzlActiveTF() {
+      return _obzlTF || _obCurrentTF || '15m';
+    }
+
+    function _obzlSetTF(tf) {
+      _obzlTF = tf;
+      // Highlight active button
+      ['5m','15m','1h','4h'].forEach(t => {
+        const b = el('obzl-tf-' + t);
+        if (!b) return;
+        const active = t === tf;
+        b.style.background   = active ? '#1e3a5f' : 'transparent';
+        b.style.color        = active ? '#93c5fd' : '#6b7280';
+        b.style.borderColor  = active ? '#1e40af' : '#374151';
+      });
+      _obzlLoad();
+    }
+
+    async function _obzlLoad() {
+      const lcEl = el('ob-zone-lifecycle');
+      if (!lcEl) return;
+      lcEl.dataset.loaded = '1';
+      const tf = _obzlActiveTF();
+      // Highlight current TF button
+      ['5m','15m','1h','4h'].forEach(t => {
+        const b = el('obzl-tf-' + t);
+        if (!b) return;
+        const active = t === tf;
+        b.style.background  = active ? '#1e3a5f' : 'transparent';
+        b.style.color       = active ? '#93c5fd' : '#6b7280';
+        b.style.borderColor = active ? '#1e40af' : '#374151';
+      });
+      lcEl.innerHTML = `<div style="color:#4b5563;font-size:9px;padding:6px">Loading ${tf} zone history…</div>`;
+      try {
+        const d = await fetch(`/api/ob-zone-lifecycle?tf=${tf}&limit=60`).then(r=>r.json());
+        _obzlData = d.zones || [];
+        _obzlRender(tf);
+      } catch(e) {
+        lcEl.innerHTML = `<div style="color:#6b7280;font-size:9px;padding:6px">Error loading history.</div>`;
+      }
+    }
+
+    function _obzlRender(tf) {
+      const lcEl = el('ob-zone-lifecycle');
+      if (!lcEl) return;
+      const zones = _obzlData;
+      const gradeCol = {'A+':'#a78bfa','A':'#60a5fa','B':'#4ade80'};
+
+      if (!zones.length) {
+        lcEl.innerHTML = `<div style="color:#374151;font-size:9px;padding:6px">
+          No zones recorded yet on ${tf} TF — data builds up as candles close on this timeframe.
+        </div>`;
+        return;
+      }
+
+      const active = zones.filter(z => z.is_active === 1).length;
+      const rows = zones.map(z => {
+        const isAct = z.is_active === 1;
+        const col   = z.zone_type === 'demand' ? '#22c55e' : '#f43f5e';
+        const gc    = gradeCol[z.grade] || '#6b7280';
+        const cDate = z.created_ist   ? z.created_ist.substr(5,11)   : '—';
+        const xDate = z.consumed_ist  ? z.consumed_ist.substr(5,11)  : null;
+        const xPx   = z.consumed_price ? '$' + Number(z.consumed_price).toFixed(0) : '';
+        return `<tr style="border-bottom:1px solid #0d1525;${isAct?'background:rgba(34,197,94,0.03)':''}">
+          <td style="padding:2px 5px;color:${col};font-size:8px;font-weight:700">${z.zone_type==='demand'?'D':'S'}</td>
+          <td style="padding:2px 5px;font-family:monospace;font-size:9px;color:#e5e7eb">
+            $${Number(z.bottom).toFixed(0)}–$${Number(z.top).toFixed(0)}
+          </td>
+          <td style="padding:2px 5px;font-family:monospace;font-size:9px;color:#f59e0b">$${Number(z.mid).toFixed(0)}</td>
+          <td style="padding:2px 5px;font-size:9px;color:${gc};font-weight:700">${z.grade||'—'}</td>
+          <td style="padding:2px 5px;font-size:8px;color:#6b7280;font-family:monospace">${cDate}</td>
+          <td style="padding:2px 5px;font-size:8px;font-family:monospace;${isAct?'color:#4ade80':'color:#f87171'}">
+            ${isAct ? '● active' : (xDate || '—') + (xPx ? ' @ ' + xPx : '')}
+          </td>
+        </tr>`;
+      }).join('');
+
+      lcEl.innerHTML = `
+        <div style="font-size:8px;color:#4b5563;padding:3px 5px 4px">
+          ${tf} — ${active} active · ${zones.length - active} consumed
+        </div>
+        <table style="width:100%;border-collapse:collapse">
+          <thead><tr style="background:#060e1c;position:sticky;top:0">
+            <th style="padding:2px 5px;color:#374151;font-size:7px;text-align:left">T</th>
+            <th style="padding:2px 5px;color:#374151;font-size:7px;text-align:left">Zone</th>
+            <th style="padding:2px 5px;color:#374151;font-size:7px;text-align:left">Mid</th>
+            <th style="padding:2px 5px;color:#374151;font-size:7px;text-align:left">Gr</th>
+            <th style="padding:2px 5px;color:#374151;font-size:7px;text-align:left">Created (IST)</th>
+            <th style="padding:2px 5px;color:#374151;font-size:7px;text-align:left">Status</th>
+          </tr></thead>
+          <tbody>${rows}</tbody>
+        </table>`;
     }
   </script>
 

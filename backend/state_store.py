@@ -129,6 +129,26 @@ CREATE TABLE IF NOT EXISTS ob_history (
     created_at       REAL    DEFAULT (strftime('%s','now'))
 );
 CREATE INDEX IF NOT EXISTS idx_ob_trader_date ON ob_history(trader_name, session_date DESC);
+
+CREATE TABLE IF NOT EXISTS ob_zone_lifecycle (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    tf               TEXT    NOT NULL,
+    zone_type        TEXT    NOT NULL,
+    born_ts          INTEGER NOT NULL,
+    top              REAL    NOT NULL,
+    bottom           REAL    NOT NULL,
+    mid              REAL    NOT NULL,
+    grade            TEXT,
+    score            REAL,
+    created_ist      TEXT    NOT NULL,
+    last_seen_ist    TEXT,
+    consumed_ist     TEXT,
+    consumed_price   REAL,
+    is_active        INTEGER DEFAULT 1,
+    created_at       REAL    DEFAULT (strftime('%s','now')),
+    UNIQUE(tf, zone_type, born_ts)
+);
+CREATE INDEX IF NOT EXISTS idx_obzl_tf_active ON ob_zone_lifecycle(tf, zone_type, is_active);
 """
 
 
@@ -170,13 +190,18 @@ class StateStore:
 
     def _sqlite_init(self):
         with sqlite3.connect(self._db_path) as c:
+            c.execute("PRAGMA journal_mode=WAL")   # concurrent-safe writes
+            c.execute("PRAGMA synchronous=NORMAL")
             c.executescript(_SCHEMA)
         # Migrations — each wrapped in try/except since the column may already exist
         with sqlite3.connect(self._db_path) as c:
-            try:
-                c.execute("ALTER TABLE trading_sessions ADD COLUMN is_force_closed INTEGER DEFAULT 0")
-            except Exception:
-                pass
+            for ddl in [
+                "ALTER TABLE trading_sessions ADD COLUMN is_force_closed INTEGER DEFAULT 0",
+                "ALTER TABLE trading_sessions ADD COLUMN balance_before REAL",
+                "ALTER TABLE trading_sessions ADD COLUMN balance_after  REAL",
+            ]:
+                try: c.execute(ddl)
+                except Exception: pass
         # session_event_log: schema handles creation; no column migrations needed yet
         # ob_history migrations — run in order before index creation
         with sqlite3.connect(self._db_path) as c:
@@ -296,15 +321,17 @@ class StateStore:
                 """INSERT INTO trading_sessions
                    (session_id, trader_name, session_date, target_line, entry_zone,
                     entry_price, entry_ts_ist, close_reason, close_ts_ist,
-                    futures_pnl, hedge_pnl, total_pnl, status)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    futures_pnl, hedge_pnl, total_pnl, status,
+                    balance_before, balance_after)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                    ON CONFLICT(session_id) DO UPDATE SET
                      close_reason=excluded.close_reason,
                      close_ts_ist=excluded.close_ts_ist,
                      futures_pnl=excluded.futures_pnl,
                      hedge_pnl=excluded.hedge_pnl,
                      total_pnl=excluded.total_pnl,
-                     status=excluded.status""",
+                     status=excluded.status,
+                     balance_after=COALESCE(excluded.balance_after, trading_sessions.balance_after)""",
                 (
                     row["session_id"], row["trader_name"], row["session_date"],
                     row.get("target_line"), row.get("entry_zone", ""),
@@ -312,15 +339,24 @@ class StateStore:
                     row.get("close_reason", ""), row.get("close_ts_ist", ""),
                     row.get("futures_pnl", 0), row.get("hedge_pnl", 0),
                     row.get("total_pnl", 0), row.get("status", "open"),
+                    row.get("balance_before"), row.get("balance_after"),
                 ),
             )
 
     async def save_session(self, session_id: str, trader_name: str, **kwargs):
-        from backend.utils import ist_now
+        from backend.utils import ist_now, get_session_day
+        from backend.config import cfg as _cfg
+        n = ist_now()
+        try:
+            exp_h = int(getattr(_cfg, "session_expiry_h", 13))
+            exp_m = int(getattr(_cfg, "session_expiry_m", 30))
+            session_date = get_session_day(n, exp_h, exp_m)
+        except Exception:
+            session_date = n.strftime("%Y-%m-%d")
         row = {
             "session_id": session_id,
             "trader_name": trader_name,
-            "session_date": ist_now().strftime("%Y-%m-%d"),
+            "session_date": kwargs.pop("session_date", session_date),
             **kwargs,
         }
         if self._db_path:
@@ -350,35 +386,72 @@ class StateStore:
             log.error(f"get_sessions error: {e}")
             return []
 
-    def _sqlite_get_sessions_filtered(self, trader_name: str, from_date: str, to_date: str, limit: int, exclude_force_closed: bool = True) -> list:
+    def _sqlite_get_sessions_filtered(self, trader_name: str, from_date: str, to_date: str, limit: int) -> list:
         with sqlite3.connect(self._db_path) as c:
             c.row_factory = sqlite3.Row
-            query = "SELECT * FROM trading_sessions"
-            params = []
-            conditions = []
+
+            # ── Part A: real sessions from trading_sessions ──────────────────
+            conds_a, params_a = [], []
             if trader_name and trader_name.lower() != "all":
-                conditions.append("trader_name=?")
-                params.append(trader_name)
+                conds_a.append("trader_name=?"); params_a.append(trader_name)
             if from_date:
-                conditions.append("session_date >= ?")
-                params.append(from_date)
+                conds_a.append("session_date >= ?"); params_a.append(from_date)
             if to_date:
-                conditions.append("session_date <= ?")
-                params.append(to_date)
-            if exclude_force_closed:
-                conditions.append("(is_force_closed IS NULL OR is_force_closed=0)")
-            if conditions:
-                query += " WHERE " + " AND ".join(conditions)
-            query += " ORDER BY created_at DESC LIMIT ?"
-            params.append(limit)
-            rows = c.execute(query, tuple(params)).fetchall()
+                conds_a.append("session_date <= ?"); params_a.append(to_date)
+            where_a = ("WHERE " + " AND ".join(conds_a)) if conds_a else ""
+            q_a = f"""
+                SELECT session_id, trader_name, session_date,
+                       target_line, entry_zone, entry_price,
+                       entry_ts_ist, close_reason, close_ts_ist,
+                       futures_pnl, hedge_pnl, total_pnl, status,
+                       created_at, is_force_closed
+                FROM trading_sessions {where_a}"""
+
+            # ── Part B: no-trade activity days (events exist, no session row) ──
+            # A "no-trade day" = session_event_log has rows for that trader+date
+            # but trading_sessions does NOT have a row for that same trader+date.
+            conds_b, params_b = [], []
+            if trader_name and trader_name.lower() != "all":
+                conds_b.append("e.trader_name=?"); params_b.append(trader_name)
+            if from_date:
+                conds_b.append("e.session_date >= ?"); params_b.append(from_date)
+            if to_date:
+                conds_b.append("e.session_date <= ?"); params_b.append(to_date)
+            where_b = ("WHERE " + " AND ".join(conds_b) + " AND ") if conds_b else "WHERE "
+            q_b = f"""
+                SELECT
+                    'notrade_' || e.trader_name || '_' || e.session_date AS session_id,
+                    e.trader_name,
+                    e.session_date,
+                    NULL AS target_line,
+                    NULL AS entry_zone,
+                    NULL AS entry_price,
+                    MIN(e.event_ts_ist) AS entry_ts_ist,
+                    NULL AS close_reason,
+                    MAX(e.event_ts_ist) AS close_ts_ist,
+                    0.0 AS futures_pnl,
+                    0.0 AS hedge_pnl,
+                    0.0 AS total_pnl,
+                    'no_trade' AS status,
+                    MIN(e.created_at) AS created_at,
+                    0 AS is_force_closed
+                FROM session_event_log e
+                {where_b}NOT EXISTS (
+                    SELECT 1 FROM trading_sessions t
+                    WHERE t.trader_name = e.trader_name
+                      AND t.session_date = e.session_date
+                )
+                GROUP BY e.trader_name, e.session_date"""
+
+            union_q = f"{q_a} UNION ALL {q_b} ORDER BY created_at DESC LIMIT ?"
+            rows = c.execute(union_q, tuple(params_a + params_b + [limit])).fetchall()
         return [dict(r) for r in rows]
 
-    async def get_sessions_filtered(self, trader_name: str, from_date: str = "", to_date: str = "", limit: int = 100, exclude_force_closed: bool = True) -> list:
+    async def get_sessions_filtered(self, trader_name: str, from_date: str = "", to_date: str = "", limit: int = 100) -> list:
         if not self._db_path: return []
         loop = asyncio.get_running_loop()
         try:
-            return await loop.run_in_executor(_pool, self._sqlite_get_sessions_filtered, trader_name, from_date, to_date, limit, exclude_force_closed)
+            return await loop.run_in_executor(_pool, self._sqlite_get_sessions_filtered, trader_name, from_date, to_date, limit)
         except Exception:
             return []
 
@@ -580,6 +653,59 @@ class StateStore:
             except Exception as e:
                 log.error(f"save_session_event error: {e}")
 
+    def _sqlite_get_session_events_by_id(self, session_id: str) -> list:
+        """
+        Get session_event_log rows for a session.
+        Handles two session_id formats:
+          - Real trade:  '2026-06-08_00-05-04_IST'  → lookup trader from trading_sessions, ±1 day
+          - No-trade:    'notrade_BullishExecutor_Paper_2026-06-07' → parse trader+date directly
+        """
+        from datetime import datetime, timedelta
+        with sqlite3.connect(self._db_path) as c:
+            c.row_factory = sqlite3.Row
+
+            if session_id.startswith("notrade_"):
+                # Format: notrade_{trader_name}_{YYYY-MM-DD}
+                # Last 10 chars = date, everything between prefix and date = trader_name
+                date_str    = session_id[-10:]
+                trader_name = session_id[len("notrade_"):-11]  # strip prefix + '_' + date
+                candidates  = [date_str]
+            else:
+                # Real session: first 10 chars = date portion
+                date_str = session_id[:10]
+                try:
+                    d = datetime.strptime(date_str, "%Y-%m-%d")
+                    candidates = [date_str, (d - timedelta(days=1)).strftime("%Y-%m-%d")]
+                except Exception:
+                    candidates = [date_str]
+                row = c.execute(
+                    "SELECT trader_name FROM trading_sessions WHERE session_id=?",
+                    (session_id,)
+                ).fetchone()
+                if not row:
+                    return []
+                trader_name = row["trader_name"]
+
+            placeholders = ",".join("?" for _ in candidates)
+            rows = c.execute(
+                f"SELECT * FROM session_event_log WHERE trader_name=? "
+                f"AND session_date IN ({placeholders}) ORDER BY created_at ASC",
+                [trader_name] + candidates,
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    async def get_session_events_by_id(self, session_id: str) -> list:
+        if not self._db_path or not session_id:
+            return []
+        loop = asyncio.get_running_loop()
+        try:
+            return await loop.run_in_executor(
+                _pool, self._sqlite_get_session_events_by_id, session_id
+            )
+        except Exception as e:
+            log.error(f"get_session_events_by_id error: {e}")
+            return []
+
     async def get_session_events(self, trader_name: str, session_date: str = "",
                                   limit: int = 500) -> list:
         if not self._db_path:
@@ -748,6 +874,75 @@ class StateStore:
                        updated_at = EXCLUDED.updated_at""",
                 key, json.dumps(value), time.time(),
             )
+
+
+    # ── OB Zone Tracking (all 4 TF, creation + consumption) ──────────────
+
+    # ── OB Zone Lifecycle (per-TF, nearest zone creation + consumption) ────
+
+    def _sqlite_upsert_ob_lifecycle(self, zones: list, tf: str, zone_type: str,
+                                     now_ist: str, consumed_born_ts: list,
+                                     consumed_price: Optional[float]):
+        with sqlite3.connect(self._db_path) as c:
+            # Insert new zones (IGNORE duplicate born_ts)
+            for z in zones:
+                c.execute(
+                    """INSERT OR IGNORE INTO ob_zone_lifecycle
+                       (tf, zone_type, born_ts, top, bottom, mid, grade, score,
+                        created_ist, last_seen_ist, is_active)
+                       VALUES (?,?,?,?,?,?,?,?,?,?,1)""",
+                    (tf, zone_type, z["born_ts"], z["top"], z["bottom"], z["mid"],
+                     z.get("grade"), z.get("score"), now_ist, now_ist),
+                )
+                c.execute(
+                    """UPDATE ob_zone_lifecycle SET last_seen_ist=?
+                       WHERE tf=? AND zone_type=? AND born_ts=? AND is_active=1""",
+                    (now_ist, tf, zone_type, z["born_ts"]),
+                )
+            # Mark consumed zones
+            for bts in consumed_born_ts:
+                c.execute(
+                    """UPDATE ob_zone_lifecycle
+                       SET is_active=0, consumed_ist=?, consumed_price=?
+                       WHERE tf=? AND zone_type=? AND born_ts=? AND is_active=1""",
+                    (now_ist, consumed_price, tf, zone_type, bts),
+                )
+
+    def _sqlite_get_ob_lifecycle(self, tf: str, limit: int) -> list:
+        with sqlite3.connect(self._db_path) as c:
+            c.row_factory = sqlite3.Row
+            rows = c.execute(
+                """SELECT * FROM ob_zone_lifecycle
+                   WHERE tf=? ORDER BY born_ts DESC LIMIT ?""",
+                (tf, limit),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    async def upsert_ob_lifecycle(self, zones: list, tf: str, zone_type: str,
+                                   now_ist: str, consumed_born_ts: list,
+                                   consumed_price: Optional[float] = None):
+        if not self._db_path:
+            return
+        loop = asyncio.get_running_loop()
+        try:
+            await loop.run_in_executor(
+                _pool, self._sqlite_upsert_ob_lifecycle,
+                zones, tf, zone_type, now_ist, consumed_born_ts, consumed_price
+            )
+        except Exception as e:
+            log.error(f"upsert_ob_lifecycle error: {e}")
+
+    async def get_ob_lifecycle(self, tf: str, limit: int = 60) -> list:
+        if not self._db_path:
+            return []
+        loop = asyncio.get_running_loop()
+        try:
+            return await loop.run_in_executor(
+                _pool, self._sqlite_get_ob_lifecycle, tf, limit
+            )
+        except Exception as e:
+            log.error(f"get_ob_lifecycle error: {e}")
+            return []
 
 
 store = StateStore()

@@ -443,6 +443,13 @@ async def get_ob_history_endpoint(trader: str = "", date: str = "", limit: int =
     return {"records": rows, "count": len(rows), "ts_ist": ist_now_str()}
 
 
+@app.get("/api/ob-zone-lifecycle")
+async def get_ob_zone_lifecycle(tf: str = "15m", limit: int = 60):
+    """OB zone lifecycle history for a specific TF — creation and consumption timestamps."""
+    zones = await store.get_ob_lifecycle(tf=tf, limit=limit)
+    return {"zones": zones, "tf": tf, "ts_ist": ist_now_str()}
+
+
 @app.get("/api/events/forecast")
 async def get_events_forecast(refresh: bool = False):
     """
@@ -1033,6 +1040,12 @@ async def get_journal_sessions(trader: str = "all", from_date: str = "", to_date
 async def get_journal_session_trades(session_id: str):
     trades = await store.get_trades_by_session(session_id)
     return {"trades": trades, "ts_ist": ist_now_str()}
+
+@app.get("/api/journal/sessions/{session_id}/events")
+async def get_journal_session_events(session_id: str):
+    """Session timeline events for a specific session (by session_id)."""
+    events = await store.get_session_events_by_id(session_id)
+    return {"events": events, "ts_ist": ist_now_str()}
 
 @app.get("/api/journal/summary")
 async def get_journal_summary(trader: str = "all", from_date: str = "", to_date: str = ""):

@@ -53,6 +53,7 @@ from backend.agents.bearish_executor import BearishExecutor
 from backend.agents.volatile_trader  import VolatileTrader
 from backend.execution.paper_engine  import PaperEngine
 from backend.data.event_calendar     import event_calendar
+from backend.data.ob_tracker         import ob_tracker
 
 # Each trader has an INDEPENDENT $100k virtual balance — no shared state
 _bull_paper = PaperEngine(); _bull_paper._state_key = "paper_engine_state_bull"
@@ -156,6 +157,7 @@ async def startup():
     await bearish.start()
     await volatile.start()
     log.info("All 3 traders started.")
+    await ob_tracker.start()
 
     # 6. Background tasks
     asyncio.create_task(_squareoff_broadcaster(bullish, "bull_force_close_h", "bull_force_close_m"))

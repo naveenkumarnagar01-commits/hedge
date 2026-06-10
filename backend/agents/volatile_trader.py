@@ -342,9 +342,32 @@ class VolatileTrader:
     # Event activation
     # ─────────────────────────────────────────────────────────────
 
+    def _ep(self, key: str, default):
+        """Return event-specific param, falling back to global CFG vol_ key."""
+        ev_params = (self._active_event or {}).get("params", {})
+        return ev_params.get(key, getattr(cfg, f"vol_{key}", default))
+
+    async def _log_vol_event(self, event_type: str, message: str = ""):
+        """Persist a key event to session_event_log for post-session audit."""
+        try:
+            ev = self._active_event or {}
+            ev_time = ev.get("event_time", "")
+            session_date = ev_time[:10] if ev_time else datetime.now(_IST).strftime("%Y-%m-%d")
+            await store.save_session_event(
+                trader_name=self.name,
+                session_date=session_date,
+                event_ts_ist=datetime.now(_IST).strftime("%Y-%m-%d %H:%M:%S IST"),
+                event_type=event_type,
+                state=self._state.value,
+                price=round(self._mark, 1),
+                message=message,
+            )
+        except Exception as e:
+            log.debug(f"_log_vol_event failed: {e}")
+
     async def _check_for_active_event(self, now: datetime):
         from backend.utils import is_blackout_day
-        if is_blackout_day(now.date(), bool(getattr(cfg, "vol_skip_weekends", False)),
+        if is_blackout_day(now.date(), False,
                            str(getattr(cfg, "vol_blackout_dates", ""))):
             return
 
@@ -361,10 +384,11 @@ class VolatileTrader:
             wc = self._compute_window_close(et)
             if et <= now <= wc:
                 self._active_event = {
-                    "id": e["id"],
-                    "name": e["name"],
-                    "event_time": e["event_time"],
+                    "id":           e["id"],
+                    "name":         e["name"],
+                    "event_time":   e["event_time"],
                     "window_close": wc.strftime("%Y-%m-%dT%H:%M"),
+                    "params":       e.get("params", {}),  # per-event trading params
                 }
                 self._state = VState.SEARCHING
                 await self._save_state()
@@ -372,6 +396,9 @@ class VolatileTrader:
                     f"Window open for '{e['name']}' — "
                     f"searching until {wc.strftime('%d %b %H:%M IST')}"
                 )
+                await self._log_vol_event("search_started",
+                    f"event='{e['name']}' window_close={wc.strftime('%H:%M IST')} "
+                    f"params={e.get('params', {})}")
                 await self._broadcast()
                 return
 
@@ -417,8 +444,8 @@ class VolatileTrader:
         call_ask = float(call.get("ask") or 0)
         combined = put_ask + call_ask
 
-        max_prem = float(getattr(cfg, "vol_combined_premium_max", 800.0))
-        min_qty = float(getattr(cfg, "vol_min_ask_qty", 1.0))
+        max_prem = float(self._ep("combined_premium_max", 800.0))
+        min_qty  = float(self._ep("min_ask_qty", 1.0))
         put_qty = float(put.get("ask_qty") or 0)
         call_qty = float(call.get("ask_qty") or 0)
 
@@ -462,8 +489,8 @@ class VolatileTrader:
             return None
 
         chain = list(chain_dict.values())
-        gap = float(getattr(cfg, "vol_strike_gap", 500.0))
-        tol = float(getattr(cfg, "vol_strike_gap_tolerance", 50.0))
+        gap = float(self._ep("strike_gap", 500.0))
+        tol = float(self._ep("strike_gap_tolerance", 50.0))
 
         # ITM puts: put_strike > spot → intrinsic = put_strike - spot > 0
         itm_puts = [
@@ -535,8 +562,8 @@ class VolatileTrader:
 
         put_ask = float(put.get("ask") or 0)
         call_ask = float(call.get("ask") or 0)
-        qty = float(getattr(cfg, "vol_contract_qty", 1.0))
-        tp_mult = float(getattr(cfg, "vol_tp_multiplier", 1.10))
+        qty     = float(self._ep("contract_qty", 1.0))
+        tp_mult = float(self._ep("tp_multiplier", 1.10))
         target = combined * tp_mult
 
         put_sym = put.get("symbol", "")
@@ -597,6 +624,9 @@ class VolatileTrader:
             f"CALL {call_sym} @ {call_ask:.2f}  "
             f"combined={combined:.2f}  TP each @ {target:.2f}"
         )
+        await self._log_vol_event("trade_entered",
+            f"PUT {put_sym} @{put_ask:.2f} | CALL {call_sym} @{call_ask:.2f} "
+            f"combined={combined:.2f} TP_each={target:.2f} qty={qty}")
         self._state = VState.MANAGING
 
         evt_id = (self._active_event or {}).get("id", "")
@@ -698,6 +728,9 @@ class VolatileTrader:
                 self._put_leg["closed"] and self._call_leg["closed"]):
             self._state = VState.DONE
             await self._log(f"All legs closed — session PnL: {self._session_pnl:+.2f} USDT")
+            await self._log_vol_event("session_complete",
+                f"total_pnl={self._session_pnl:+.2f} "
+                f"event='{(self._active_event or {}).get('name','?')}'")
             evt_id = (self._active_event or {}).get("id", "")
             if evt_id:
                 from backend.utils import ist_now_str as _isn
@@ -749,6 +782,9 @@ class VolatileTrader:
         leg["close_price"] = price
         leg["close_reason"] = reason
         await self._log(f"SOLD {sym} @ {price:.2f} [{reason}]  PnL: {pnl:+.2f}")
+        await self._log_vol_event("leg_sold",
+            f"{sym} @{price:.2f} reason={reason} pnl={pnl:+.2f} "
+            f"entry={leg['entry_price']:.2f} session_pnl={self._session_pnl:+.2f}")
         from backend.utils import ist_now_str, utc_now as _utc_now
         evt_id = (self._active_event or {}).get("id", "")
         await store.save_paper_trade(
