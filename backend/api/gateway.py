@@ -449,6 +449,18 @@ async def get_ob_zone_lifecycle(tf: str = "15m", limit: int = 60):
     zones = await store.get_ob_lifecycle(tf=tf, limit=limit)
     return {"zones": zones, "tf": tf, "ts_ist": ist_now_str()}
 
+@app.get("/api/ob-snapshots")
+async def get_ob_snapshots(date: str = "", tf: str = "", limit: int = 200):
+    """Get daily OB snapshot history. Filter by date and/or TF."""
+    rows = await store.get_ob_daily_snapshots(date=date, tf=tf, limit=limit)
+    return {"records": rows, "count": len(rows), "ts_ist": ist_now_str()}
+
+@app.get("/api/ob-snapshot-dates")
+async def get_ob_snapshot_dates(limit: int = 60):
+    """Get list of dates that have snapshots."""
+    dates = await store.get_ob_snapshot_dates(limit=limit)
+    return {"dates": dates, "ts_ist": ist_now_str()}
+
 
 @app.get("/api/events/forecast")
 async def get_events_forecast(refresh: bool = False):
@@ -688,15 +700,17 @@ async def volatile_add_event(body: dict):
     """
     name = body.get("name", "").strip()
     event_time = body.get("event_time", "").strip()
+    params = body.get("params") or {}
     if not name:
         raise HTTPException(status_code=400, detail="name required")
     if not event_time:
         raise HTTPException(status_code=400, detail="event_time required (YYYY-MM-DDTHH:MM)")
     vol = _get_vol()
     before = len(vol.get_events())
-    event = await vol.add_event(name, event_time)
+    event = await vol.add_event(name, event_time, params=params)
     after  = len(vol.get_events())
-    status = "saved" if after > before else "duplicate"
+    params_updated = event.pop("_params_updated", False)
+    status = "saved" if (after > before or params_updated) else "duplicate"
     return {"status": status, "event": event, "ts_ist": ist_now_str()}
 
 
@@ -716,7 +730,8 @@ async def volatile_update_event(event_id: str, body: dict):
     event_time = body.get("event_time", "").strip()
     if not event_time:
         raise HTTPException(status_code=400, detail="event_time required")
-    updated = await _get_vol().update_event(event_id, name, event_time)
+    params  = body.get("params")
+    updated = await _get_vol().update_event(event_id, name, event_time, params=params)
     if not updated:
         raise HTTPException(status_code=404, detail=f"Event '{event_id}' not found")
     return {"status": "updated", "event": updated, "ts_ist": ist_now_str()}

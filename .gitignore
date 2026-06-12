@@ -4,7 +4,11 @@
 # ── Runtime / state ────────────────────────────────────────
 hedge_state.db
 *.db
+*.db-shm
+*.db-wal
 *.sqlite3
+backups/
+temp_accounts.json
 
 # ── Logs ───────────────────────────────────────────────────
 *.log

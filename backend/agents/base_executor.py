@@ -35,6 +35,7 @@ from backend.utils import (ist_now, ist_now_str,
                            get_session_day)
 
 SET_LINES = "SET_LINES"
+_OB_TFS   = ("5m", "15m", "1h", "4h")   # smallest → largest (priority order)
 
 
 class ExState(Enum):
@@ -153,6 +154,12 @@ class BaseExecutor:
         # True while _run_ob_analysis is awaited — shown as "CALCULATING" in panel
         self._is_analyzing: bool = False
 
+        # Multi-TF OB session snapshot — locked once at window open, held for session
+        # {tf: {zone_type: zone_dict|None, "current_price": float}}
+        self._session_obs: dict = {}
+        # Smallest TF that is currently price-active (updated in verify loop)
+        self._active_ob_tf: str = ""
+
         # OB wait-mode: window is open but no qualifying zone existed at open.
         # Trader stays SLEEP and watches for a new candle-close on its OB TF.
         # As soon as a valid zone forms, it locks it and transitions to CHECK_ELIGIBILITY.
@@ -251,25 +258,23 @@ class BaseExecutor:
 
     async def _on_candle_close(self, msg: dict):
         """
-        Fires on every CANDLE_CLOSE event. When OB wait-mode is active (no zone found
-        at window open), re-scan after each final candle on the trader's OB TF.
+        Fires on every CANDLE_CLOSE. When OB wait-mode is active, re-scan on any
+        final candle across all 4 tracked TFs (5m / 15m / 1h / 4h).
         """
         if not self._ob_wait_active:
             return
-        d = msg.get("data", {})
-        tf_str = str(self._cfg("ob_tf") or getattr(cfg, "ob_tf", "15m"))
-        if d.get("tf") != tf_str:
-            return
+        d      = msg.get("data", {})
         candle = d.get("candle", {})
         if not candle.get("is_final"):
             return
+        if d.get("tf") not in _OB_TFS:
+            return
         candle_ts = int(candle.get("ts", 0))
         if candle_ts == self._last_ob_candle_ts:
-            return  # already processed this candle
+            return
         self._last_ob_candle_ts = candle_ts
 
-        # Only scan when inside the trading window
-        n = ist_now()
+        n      = ist_now()
         _exp_h = int(getattr(cfg, "session_expiry_h", 13))
         _exp_m = int(getattr(cfg, "session_expiry_m", 30))
         def _ci(key, default): v = self._cfg(key); return int(v) if v is not None else default
@@ -285,80 +290,49 @@ class BaseExecutor:
 
     async def _try_ob_from_candle_close(self):
         """
-        Called when a new candle closes on the trader's OB TF while in wait-mode.
-        Re-runs OB detection. If the required zone now exists, locks it and
-        transitions to CHECK_ELIGIBILITY for the normal eligibility flow.
+        Re-snapshot all 4 TFs after a new candle closes in wait-mode.
+        If any zone now exists, lock and transition to CHECK_ELIGIBILITY.
         """
-        from backend.data.futures_feed import get_candles, fetch_historical_candles
-        from backend.data.order_blocks import detect
+        zone_type   = "demand" if self.direction == "BULLISH" else "supply"
+        target_line = await self._run_ob_analysis()
 
-        n_candles = int(getattr(cfg, "ob_candle_count", 500))
-        tf_str    = str(self._cfg("ob_tf") or getattr(cfg, "ob_tf", "15m"))
-        zone_type = "demand" if self.direction == "BULLISH" else "supply"
+        if not target_line:
+            return  # still no zone on any TF — keep waiting
 
-        candles = get_candles(n_candles, tf_str)
-        if len(candles) < max(n_candles // 2, 10):
-            candles = await fetch_historical_candles(n_candles, tf_str)
-        if not candles:
-            return
+        now_str = ist_now_str()
+        _exp_h  = int(getattr(cfg, "session_expiry_h", 13))
+        _exp_m  = int(getattr(cfg, "session_expiry_m", 30))
+        ses_day = get_session_day(ist_now(), _exp_h, _exp_m)
 
-        result = detect(candles)
-        zones  = result.get(zone_type, [])
-        if not zones:
-            return  # still no zone — keep waiting
+        # Find smallest TF zone for display lines
+        active_tf = self.analysis_report.get("tf", "15m")
+        zone = self.analysis_report.get("ob_zone", {})
 
-        zone        = zones[0]
-        target_line = float(zone["mid"])
-        now_str     = ist_now_str()
-
-        _exp_h   = int(getattr(cfg, "session_expiry_h", 13))
-        _exp_m   = int(getattr(cfg, "session_expiry_m", 30))
-        ses_day  = get_session_day(ist_now(), _exp_h, _exp_m)
-
-        # Lock the zone — identical fields to what _run_ob_analysis sets
-        self.analysis_report = {
-            "ob_zone":                zone,
-            "ob_type":                zone_type,
-            "selected_line":          zone["mid"],
-            "current_price":          result.get("current_price", 0),
-            "candle_count":           result.get("candle_count", 0),
-            "tf":                     tf_str,
-            "all_demand":             result.get("demand", []),
-            "all_supply":             result.get("supply", []),
-            "analysis_time":          now_str,
-            "analysis_session_day":   ses_day,
-            "ob_formed_during_window": True,
-            "ob_wait_started":        self._ob_wait_since,
-            "ob_wait_reason":        self._ob_wait_reason,
-        }
         self.locked_high_line = target_line
         self.locked_low_line  = target_line
         self.high_line        = float(zone.get("top",    target_line))
         self.low_line         = float(zone.get("bottom", target_line))
         self._ob_wait_active  = False
+        self.analysis_report["ob_formed_during_window"] = True
+        self.analysis_report["ob_wait_started"]         = self._ob_wait_since
+        self.analysis_report["ob_wait_reason"]          = self._ob_wait_reason
 
-        # Persist OB history — update the existing "waiting" row
         await store.update_ob_record(
-            self.name, ses_day, tf_str,
+            self.name, ses_day, active_tf,
             status="formed_during_window",
-            zone_top=zone["top"], zone_bottom=zone["bottom"],
-            zone_mid=zone["mid"], zone_score=zone["score"],
-            zone_grade=zone["grade"], found_at_ts=now_str, locked_at_ts=now_str,
+            zone_top=zone.get("top"), zone_bottom=zone.get("bottom"),
+            zone_mid=zone.get("mid"), zone_score=zone.get("score"),
+            zone_grade=zone.get("grade"), found_at_ts=now_str, locked_at_ts=now_str,
         )
-
         await self._log(
             f"NEW {zone_type.upper()} OB formed during window → "
-            f"${zone.get('bottom', 0):.0f}–${zone.get('top', 0):.0f} "
-            f"| mid={target_line:.0f} | {zone.get('grade', '')} "
-            f"(score={zone.get('score', 0)}) | locked at {now_str}"
+            f"{active_tf} TF: ${zone.get('bottom',0):.0f}–${zone.get('top',0):.0f} "
+            f"mid={target_line:.0f} | {zone.get('grade','')} | locked at {now_str}"
         )
         await self._log_session_event("ob_locked_during_window",
-            f"{zone_type} OB ${zone.get('bottom',0):.0f}-${zone.get('top',0):.0f} "
+            f"{zone_type} {active_tf} OB ${zone.get('bottom',0):.0f}-${zone.get('top',0):.0f} "
             f"mid={target_line:.0f} grade={zone.get('grade','')} formed and locked")
 
-        # Transition to CHECK_ELIGIBILITY — _do_eligibility_check will detect
-        # today_analyzed=True (analysis_report + locked_high_line are set) and
-        # skip the OB fetch, going straight to the eligibility/proximity check.
         if self.state == ExState.SLEEP:
             self.state = ExState.CHECK_ELIGIBILITY
         await self._save_state()
@@ -384,12 +358,44 @@ class BaseExecutor:
             await self._log("Squareoff broadcast received — initiating force close.")
             await self._do_force_close()
 
-    # ── Per-trader config accessor ─────────────────────────────────────────
+    # ── Per-trader config accessors ────────────────────────────────────────
 
     def _cfg(self, key: str):
         """Read per-trader config: prepends bull_ or bear_ prefix."""
         full_key = self._cfg_prefix + key
         return getattr(cfg, full_key, None)
+
+    def _ob_tf_cfg(self, tf: str, key: str):
+        """Read per-TF OB setting. e.g. _ob_tf_cfg('15m','tolerance') → bull_ob_15m_tolerance"""
+        return getattr(cfg, f"{self._cfg_prefix}ob_{tf}_{key}", None)
+
+    def _find_active_ob_tf(self, price: float):
+        """
+        Scan all 4 TFs smallest→largest. Return (tf, zone) for the first TF
+        where |price − zone.mid| ≤ tolerance. Returns None if no TF matches.
+        """
+        if not self._session_obs:
+            return None
+        zone_type = "demand" if self.direction == "BULLISH" else "supply"
+        for tf in _OB_TFS:
+            zone = self._session_obs.get(tf, {}).get(zone_type)
+            if not zone:
+                continue
+            mid = float(zone.get("mid", 0))
+            if not mid:
+                continue
+            tol = float(self._ob_tf_cfg(tf, "tolerance") or 100.0)
+            if abs(price - mid) <= tol:
+                return tf, zone
+        return None
+
+    def _get_trade_qty(self) -> float:
+        """Active TF qty if set; falls back to legacy contract_qty."""
+        if self._active_ob_tf:
+            v = self._ob_tf_cfg(self._active_ob_tf, "qty")
+            if v is not None:
+                return float(v)
+        return float(self._cfg("contract_qty") or 1.0)
 
     # ── Main loop ──────────────────────────────────────────────────────────
 
@@ -507,17 +513,7 @@ class BaseExecutor:
         # ── SLEEP ────────────────────────────────────────────────────────────
         if self.state == ExState.SLEEP:
             if in_window:
-                # Guard A: Zone found but price too far — watch every tick until price approaches
-                if (self.locked_high_line
-                        and self._eligibility_date == session_day
-                        and self.eligible_today is not True):
-                    if not self._is_eligible(p, self.locked_high_line):
-                        # Price still outside tolerance — keep publishing, don't re-run analysis
-                        await self._publish_monitor(p, in_window)
-                        return
-                    # Price just entered tolerance window → fall through to re-check eligibility
-
-                # Guard B: Candle-data failure with retry cooldown (no locked zone)
+                # Guard B: candle-data failure with retry cooldown
                 if (self._eligibility_date == session_day
                         and self.eligible_today is False
                         and not self.locked_high_line):
@@ -525,34 +521,101 @@ class BaseExecutor:
                     if retry_after and time.time() < retry_after:
                         await self._publish_monitor(p, in_window)
                         return
-                    # Retry cooldown expired — fall through to re-run analysis
 
                 # Guard C: OB wait-mode — no zone yet, watching for candle-close
                 if getattr(self, "_ob_wait_active", False):
                     await self._publish_monitor(p, in_window)
                     return
-                # Mark session start — clears previous session's trades (in-memory only)
+
+                # Guard D: already blocked for today (timed out / force-closed / blackout)
+                if self.eligible_today is False and self._eligibility_date == session_day:
+                    await self._publish_monitor(p, in_window)
+                    return
+
+                # Blackout check
                 today_date = ist_now().date()
                 from backend.utils import is_blackout_day
                 _blk_val = self._cfg("blackout_dates")
                 blk_dates = "" if _blk_val is None else str(_blk_val)
-                if is_blackout_day(today_date, False, blk_dates):
+                _skip_wknd_val = self._cfg("skip_weekends")
+                _skip_wknd = bool(_skip_wknd_val) if _skip_wknd_val is not None else True
+                if is_blackout_day(today_date, _skip_wknd, blk_dates):
                     await self._log(f"Calendar blackout: {today_date.strftime('%A %Y-%m-%d')} — staying SLEEP")
                     self.eligible_today = False
                     self._eligibility_date = today_date.isoformat()
                     await self._publish_monitor(p, False)
                     return
 
+                # Mark session start once
                 if self.session_start_ts == 0.0:
                     self.session_start_ts = time.time()
                     if self._paper is not None:
                         self._paper.clear_session_trades()
-                    # Log session_start ONCE per session — marks when window first activated
                     await self._log_session_event("session_start",
                         f"direction={self.direction} "
                         f"window={_ts_h:02d}:{_ts_m:02d}–{_te_h:02d}:{_te_m:02d} IST "
                         f"squareoff={_fc_h:02d}:{_fc_m:02d} IST price={p:.0f}")
-                self.state = ExState.CHECK_ELIGIBILITY
+
+                # Load OBs if not done for this session
+                if not self._session_obs or self._eligibility_date != session_day:
+                    self.state = ExState.CHECK_ELIGIBILITY
+                    await self._publish_monitor(p, in_window)
+                    return
+
+                # OBs loaded — check if price is currently in ANY OB zone
+                active = self._find_active_ob_tf(p)
+                if active:
+                    active_tf, active_zone = active
+                    self._active_ob_tf     = active_tf
+                    self.trigger_line      = float(active_zone.get("mid", self.trigger_line or p))
+                    self.entry_zone        = "near_ob"
+                    self.trigger_type      = f"ob_{active_tf}"
+                    self._loop_iter        = 0
+                    self._far_check        = None
+                    self.triggered         = True
+                    self.trigger_time      = ist_now_str()
+                    self._verify_start_time = time.time()
+                    self._prox_bad_ticks   = 0
+                    self._verify_last_fail  = ""
+                    self._verify_fail_counts = {"prox": 0, "prem": 0, "tv": 0, "spread": 0, "no_itm": 0}
+                    self.state = ExState.VERIFY_HEDGE_LOOP
+                    zone_type = "demand" if self.direction == "BULLISH" else "supply"
+                    await self._log(
+                        f"ELIGIBLE | Price ${p:.0f} in {active_tf} {zone_type} OB "
+                        f"mid=${self.trigger_line:.0f} | All 4 conditions must pass."
+                    )
+                    await self._log_session_event("trigger_snapshot", {
+                        "trigger_tf":   active_tf,
+                        "trigger_price": round(p, 1),
+                        "zone_mid":     round(self.trigger_line, 1),
+                        "zone_top":     round(float(active_zone.get("top", self.trigger_line)), 1),
+                        "zone_bottom":  round(float(active_zone.get("bottom", self.trigger_line)), 1),
+                        "zone_grade":   active_zone.get("grade", ""),
+                        "buffer_pts":   float(self._ob_tf_cfg(active_tf, "tolerance") or 100),
+                        "direction":    self.direction,
+                        "all_4tf_zones": {
+                            tf: {
+                                "mid":    round(float((self._session_obs.get(tf, {}).get(zone_type) or {}).get("mid", 0) or 0), 1),
+                                "top":    round(float((self._session_obs.get(tf, {}).get(zone_type) or {}).get("top", 0) or 0), 1),
+                                "bottom": round(float((self._session_obs.get(tf, {}).get(zone_type) or {}).get("bottom", 0) or 0), 1),
+                                "grade":  (self._session_obs.get(tf, {}).get(zone_type) or {}).get("grade", ""),
+                            }
+                            for tf in ("5m", "15m", "1h", "4h")
+                            if self._session_obs.get(tf, {}).get(zone_type)
+                        },
+                    })
+                    history = store.get(f"{self.name}_triggers", [])
+                    history.append({
+                        "ts": self.trigger_time, "trigger_type": self.trigger_type,
+                        "entry_zone": self.entry_zone,
+                        "trigger_line": round(self.trigger_line, 2),
+                        "price": round(p, 2), "result": "pending",
+                    })
+                    if len(history) > 100:
+                        history = history[-100:]
+                    await store.set(f"{self.name}_triggers", history)
+                    await self._save_state()
+                    await self._broadcast_position()
             await self._publish_monitor(p, in_window)
             return
 
@@ -570,25 +633,15 @@ class BaseExecutor:
             return
 
         # ── WAIT_TRIGGER ─────────────────────────────────────────────────────
-        # Reached via crash-recovery from DB (hedge-fill timeout previously set this).
-        # Safely redirect back to VERIFY or CHECK depending on state.
+        # Crash-recovery only. Return to SLEEP so zone scanning resumes naturally.
         if self.state == ExState.WAIT_TRIGGER:
             if not in_window:
                 await self._log("Window closed (WAIT_TRIGGER). Back to SLEEP.")
                 await self._reset_daily()
                 await self._publish_monitor(p, False)
                 return
-            if self.triggered and self.trigger_line:
-                dist = abs(p - self.trigger_line)
-                max_dist = self._cfg("max_distance_from_line") or 100
-                if dist <= max_dist:
-                    await self._log("WAIT_TRIGGER: price near line, re-entering VERIFY_HEDGE_LOOP.")
-                    self.state = ExState.VERIFY_HEDGE_LOOP
-                    self._verify_start_time = time.time()
-                    self._prox_bad_ticks    = 0
-                # else: stay in WAIT_TRIGGER until price comes back
-            else:
-                self.state = ExState.CHECK_ELIGIBILITY
+            await self._log("WAIT_TRIGGER (crash-recovery) → resuming zone scan from SLEEP.")
+            self.state = ExState.SLEEP
             await self._publish_monitor(p, in_window)
             return
 
@@ -643,7 +696,7 @@ class BaseExecutor:
                 f"direction={self.direction} → nearest {zone_type} zone"
             )
             await self._log_session_event("window_open",
-                f"direction={self.direction} tf={self._cfg('ob_tf') or getattr(cfg,'ob_tf','15m')} price={price:.0f}")
+                f"direction={self.direction} scanning 4TF OBs price={price:.0f}")
             await self._publish_monitor(price, in_window)
             try:
                 target_line = await self._run_ob_analysis()
@@ -726,113 +779,92 @@ class BaseExecutor:
                 f"OB analysis already done today → reusing mid={target_line:.2f}"
             )
 
-        target = self.locked_high_line   # this IS the target line for this trader
-
-        # Eligibility: is price in the correct zone for this direction?
-        eligible = self._is_eligible(price, target)
-        self.eligible_today = eligible
-
-        if not eligible:
-            zone_reason = self._ineligible_reason(price, target)
-            await self._log(
-                f"Price too far from {zone_type} OB zone — entering WATCH mode. "
-                f"{zone_reason}",
-                level="WARNING"
-            )
-            await self._log_session_event("price_watch",
-                f"{zone_type} OB locked at ${target:.0f}. {zone_reason}")
-            # Do NOT mark eligible_today=False — keep as None so SLEEP Guard A
-            # re-checks every tick and transitions to VERIFY_HEDGE_LOOP the moment
-            # price enters ±max_distance_from_line of the locked zone mid.
-            self.eligible_today = None
-            self.state = ExState.SLEEP
-            return
-
-        # Determine zone label for display
-        zone, zone_desc = self._zone_info(price, target)
-
-        self.entry_zone   = zone
-        self.trigger_type = "target_line"
-        self.trigger_line = target
-        self._loop_iter   = 0
-        self._far_check   = None
-        self.triggered    = True
-        self.trigger_time        = ist_now_str()
-        self._verify_start_time  = time.time()
-        self._prox_bad_ticks     = 0
-        self._verify_last_fail   = ""
-        self._verify_fail_counts = {"prox": 0, "prem": 0, "tv": 0, "spread": 0, "no_itm": 0}
-        self.state = ExState.VERIFY_HEDGE_LOOP
-
+        # OBs loaded — return to SLEEP; zone scanning triggers VERIFY_HEDGE_LOOP.
+        # eligible_today=None keeps Guard D open so zone entry is detected.
+        self.eligible_today = None
+        zones_found = [tf for tf in _OB_TFS
+                       if self._session_obs.get(tf, {}).get(zone_type)]
         await self._log(
-            f"ELIGIBLE | {zone_desc} | "
-            f"Watching {target:.2f} ±{self._cfg('max_distance_from_line')}pts | "
-            f"All 4 hedge conditions must pass simultaneously."
+            f"OBs loaded — {len(zones_found)} {zone_type} zone(s) on "
+            f"{', '.join(zones_found) if zones_found else 'no TF'}. "
+            f"Monitoring all zones for price entry."
         )
-        history = store.get(f"{self.name}_triggers", [])
-        history.append({
-            "ts":           self.trigger_time,
-            "trigger_type": self.trigger_type,
-            "entry_zone":   zone,
-            "trigger_line": round(target, 2),
-            "price":        round(price, 2),
-            "result":       "pending",
-        })
-        if len(history) > 100:
-            history = history[-100:]
-        await store.set(f"{self.name}_triggers", history)
+        # Structured snapshot of zones + config at window open
+        await self._log_window_open_snapshot(price)
+        self.state = ExState.SLEEP
+        await self._save_state()
+        await self._broadcast_position()
 
     async def _run_ob_analysis(self) -> Optional[float]:
         """
-        Fetch Order Block zones at window open (once per session).
-        Bull: returns nearest demand zone mid as target_line.
-        Bear: returns nearest supply zone mid as target_line.
-        Stores full zone data in self.analysis_report.
+        Snapshot all 4 TF OBs at window open (once per session).
+        Returns mid of the smallest TF that has a zone; None if no zones found.
         """
         from backend.data.futures_feed import get_candles, fetch_historical_candles
         from backend.data.order_blocks import detect
 
-        n      = int(getattr(cfg, "ob_candle_count", 500))
-        tf_str = str(self._cfg("ob_tf") or getattr(cfg, "ob_tf", "15m"))
-
-        candles = get_candles(n, tf_str)
-        if len(candles) < max(n // 2, 10):
-            candles = await fetch_historical_candles(n, tf_str)
-        if not candles:
-            self.analysis_report = {"error": "No candle data for OB analysis"}
-            return None
-
-        result    = detect(candles)
+        n         = int(getattr(cfg, "ob_candle_count", 500))
         zone_type = "demand" if self.direction == "BULLISH" else "supply"
-        zones     = result.get(zone_type, [])
+        self._session_obs = {}
+        found_any = False
 
-        if not zones:
+        for tf in _OB_TFS:
+            try:
+                candles = get_candles(n, tf)
+                if len(candles) < 10:
+                    candles = await fetch_historical_candles(n, tf)
+                if not candles:
+                    self._session_obs[tf] = {zone_type: None}
+                    continue
+                result = detect(candles)
+                zones  = result.get(zone_type, [])
+                zone   = zones[0] if zones else None
+                self._session_obs[tf] = {
+                    zone_type:       zone,
+                    "current_price": result.get("current_price", 0),
+                }
+                if zone:
+                    found_any = True
+                    self.log.info(
+                        f"[{self.name}] {tf} {zone_type}: "
+                        f"${zone['bottom']:.0f}–${zone['top']:.0f} "
+                        f"mid={zone['mid']:.0f} {zone['grade']} "
+                        f"score={zone['score']} dist={zone.get('distance_pct',0):.1f}%"
+                    )
+                else:
+                    self.log.info(f"[{self.name}] {tf} {zone_type}: no zone")
+            except Exception as e:
+                self.log.warning(f"[{self.name}] {tf} OB fetch error: {e}")
+                self._session_obs[tf] = {zone_type: None}
+
+        if not found_any:
             self.analysis_report = {
-                "error":         f"No {zone_type} zone detected",
-                "ob_zone":       None,
-                "ob_type":       zone_type,
-                "current_price": result.get("current_price", 0),
-                "tf":            tf_str,
+                "error":       f"No {zone_type} zone on any TF (5m/15m/1h/4h)",
+                "ob_zone":     None,
+                "ob_type":     zone_type,
+                "session_obs": self._session_obs,
                 "analysis_time": ist_now_str(),
             }
             return None
 
-        zone = zones[0]   # nearest zone (detect() sorts by distance_pct)
         _exp_h = int(getattr(cfg, "session_expiry_h", 13))
         _exp_m = int(getattr(cfg, "session_expiry_m", 30))
-        self.analysis_report = {
-            "ob_zone":            zone,
-            "ob_type":            zone_type,
-            "selected_line":      zone["mid"],
-            "current_price":      result.get("current_price", 0),
-            "candle_count":       result.get("candle_count", 0),
-            "tf":                 tf_str,
-            "all_demand":         result.get("demand", []),
-            "all_supply":         result.get("supply", []),
-            "analysis_time":      ist_now_str(),
-            "analysis_session_day": get_session_day(ist_now(), _exp_h, _exp_m),
-        }
-        return float(zone["mid"])
+
+        # Use smallest TF that has a zone as the primary report entry
+        for tf in _OB_TFS:
+            zone = self._session_obs.get(tf, {}).get(zone_type)
+            if zone:
+                self.analysis_report = {
+                    "ob_zone":              zone,
+                    "ob_type":              zone_type,
+                    "selected_line":        zone["mid"],
+                    "current_price":        self._session_obs[tf].get("current_price", 0),
+                    "tf":                   tf,
+                    "session_obs":          self._session_obs,
+                    "analysis_time":        ist_now_str(),
+                    "analysis_session_day": get_session_day(ist_now(), _exp_h, _exp_m),
+                }
+                return float(zone["mid"])
 
     def _zone_info(self, price: float, target: float):
         """Returns (zone_key, zone_description) for display."""
@@ -867,9 +899,7 @@ class BaseExecutor:
         No abort on individual condition fail — just keep waiting.
         Only abort on: timeout or window close.
         """
-        max_dist = self._cfg("max_distance_from_line")
-        timeout  = cfg.verify_hedge_timeout_sec
-        dist     = abs(price - self.trigger_line)
+        timeout = cfg.verify_hedge_timeout_sec
         self._loop_iter += 1
 
         # Timeout — only hard abort besides window close
@@ -888,20 +918,60 @@ class BaseExecutor:
                 f"last_fail=[{self._verify_last_fail}] "
                 f"prox={fc['prox']} prem={fc['prem']} "
                 f"tv={fc['tv']} spread={fc['spread']} no_itm={fc['no_itm']}")
-            await self._reset_daily()
+            # Light reset: keep OB data loaded; only reset verify state.
+            # Trader returns to SLEEP and re-triggers when price re-enters any zone.
+            self.triggered           = False
+            self.trigger_type        = ""
+            self.trigger_line        = 0.0
+            self.trigger_time        = ""
+            self._loop_iter          = 0
+            self._far_check          = None
+            self._verify_start_time  = 0.0
+            self._prox_bad_ticks     = 0
+            self._verify_last_fail   = ""
+            self._verify_fail_counts = {"prox": 0, "prem": 0, "tv": 0, "spread": 0, "no_itm": 0}
+            self._active_ob_tf       = ""
+            self.state = ExState.SLEEP
+            await self._save_state()
             await self._publish_monitor(price, in_window, prox_ok=False)
             return
 
-        # Condition 1 — Proximity (simple check, no abort on fail)
-        prox_ok = dist <= max_dist
+        # ── Condition 1 — Multi-TF proximity (smallest active TF wins) ────────
+        active = self._find_active_ob_tf(price)
+        if active:
+            active_tf, active_zone = active
+            self._active_ob_tf = active_tf
+            self.trigger_line  = float(active_zone.get("mid", self.trigger_line))
+            max_dist  = float(self._ob_tf_cfg(active_tf, "tolerance") or 100.0)
+            dist      = abs(price - self.trigger_line)
+            prox_ok   = dist <= max_dist
+            max_prem  = float(self._ob_tf_cfg(active_tf, "max_premium")
+                              or self._cfg("max_premium") or 320.0)
+        else:
+            # Price left all OB zones — exit verify loop, return to SLEEP
+            self._update_last_trigger_result("left-zone")
+            self._active_ob_tf      = ""
+            self.triggered          = False
+            self.trigger_line       = 0.0
+            self.trigger_time       = ""
+            self._loop_iter         = 0
+            self._verify_start_time = 0.0
+            self._prox_bad_ticks    = 0
+            self._verify_last_fail  = ""
+            self._verify_fail_counts = {"prox": 0, "prem": 0, "tv": 0, "spread": 0, "no_itm": 0}
+            self.state = ExState.SLEEP
+            await self._log("Price left all OB zones — back to SLEEP (will re-trigger on re-entry)")
+            await self._save_state()
+            await self._publish_monitor(price, in_window, prox_ok=False)
+            return
 
         # Condition 2/3/4 — Option eligibility
         from backend.data.options_feed import get_nearest_itm_put, get_nearest_itm_call
         itm = (get_nearest_itm_put(price) if self._option_side == "P"
                else get_nearest_itm_call(price))
 
-        max_prem = self._cfg("max_premium")
-        max_tv   = self._cfg("max_time_value")
+        _per_tv  = self._ob_tf_cfg(active_tf, "max_time_value") if active_tf else None
+        max_tv   = float(_per_tv) if _per_tv is not None else float(self._cfg("max_time_value") or 220.0)
         max_sprd = self._cfg("price_diff_percent")
 
         prem_ok = spread_ok = tv_ok = None
@@ -926,11 +996,11 @@ class BaseExecutor:
         )
 
         if not hedge_valid:
-            # Track which conditions are failing (for timeout report)
             fails = []
             if not prox_ok:
                 self._verify_fail_counts["prox"] += 1
-                fails.append(f"prox({dist:.0f}pts>max={max_dist})")
+                tf_tag = self._active_ob_tf or "no_tf"
+                fails.append(f"prox({tf_tag}:{dist:.0f}pts>tol={max_dist})")
             if not itm:
                 self._verify_fail_counts["no_itm"] += 1
                 fails.append("no_itm")
@@ -1080,7 +1150,12 @@ class BaseExecutor:
 
         sym = itm["symbol"]
         ask = itm["ask"]
-        qty = self._cfg("contract_qty")
+        qty = self._get_trade_qty()
+
+        self.log.info(
+            f"[{self.name}] EXECUTE: active_tf={self._active_ob_tf or '?'} qty={qty} "
+            f"hedge={sym} ask={ask:.2f}"
+        )
 
         paper.executor = self.name
 
@@ -1185,38 +1260,42 @@ class BaseExecutor:
         await self._save_state()
         await self._broadcast_position()
 
-        # ── Session event: trade summary ────────────────────────────────────
-        await self._log_session_event("trade_entered",
-            f"hedge={sym} @{fill_px:.2f} futures={self._futures_side} @{fut_px:.2f} "
-            f"premium={self.hedge_premium_paid:.2f}")
-
-        # ── Session event: hedge conditions at execution ────────────────────
-        await self._log_session_event("hedge_conditions",
-            f"premium={fill_px:.2f}(max={self._cfg('max_premium')}) "
-            f"TV={self.hedge_tv_at_entry:.2f}(max={self._cfg('max_time_value')}) "
-            f"intrinsic={self.hedge_intrinsic_at_entry:.2f} "
-            f"spread_max={self._cfg('price_diff_percent')}% "
-            f"prox_max={self._cfg('max_distance_from_line')}pts")
-
-        # ── Session event: config snapshot at entry ─────────────────────────
-        _c = self._cfg
-        await self._log_session_event("config_at_entry",
-            f"contract_qty={_c('contract_qty')} "
-            f"partial_ratio={_c('partial_profit_ratio')} "
-            f"session_target={_c('session_pnl_target') or _c('full_close_target')} "
-            f"max_premium={_c('max_premium')} "
-            f"max_tv={_c('max_time_value')} "
-            f"max_dist={_c('max_distance_from_line')}")
-
-        # ── Session event: OB zone used ─────────────────────────────────────
+        # ── Structured entry snapshot (all entry details in one record) ──────
         _zone = self.analysis_report.get("ob_zone", {})
-        if _zone:
-            await self._log_session_event("ob_zone_used",
-                f"grade={_zone.get('grade')} score={_zone.get('score')} "
-                f"age={_zone.get('age_bars')}bars "
-                f"top={_zone.get('top')} bottom={_zone.get('bottom')} "
-                f"mid={_zone.get('mid')} dist={_zone.get('distance_pct')}% "
-                f"tf={self.analysis_report.get('tf','?')}")
+        _c    = self._cfg
+        await self._log_session_event("entry_snapshot", {
+            "direction":       self.direction,
+            "trigger_tf":      self._active_ob_tf or self.analysis_report.get("tf", "?"),
+            "futures_side":    self._futures_side,
+            "futures_entry":   round(fut_px, 2),
+            "futures_qty":     qty,
+            "hedge_symbol":    sym,
+            "hedge_entry":     round(fill_px, 2),
+            "hedge_premium":   round(self.hedge_premium_paid, 2),
+            "hedge_intrinsic": round(self.hedge_intrinsic_at_entry, 2),
+            "hedge_tv":        round(self.hedge_tv_at_entry, 2),
+            "zone": {
+                "tf":     self.analysis_report.get("tf", "?"),
+                "top":    _zone.get("top"),
+                "bottom": _zone.get("bottom"),
+                "mid":    _zone.get("mid"),
+                "grade":  _zone.get("grade"),
+                "score":  _zone.get("score"),
+                "age_bars": _zone.get("age_bars"),
+            } if _zone else None,
+            "conditions_at_entry": {
+                "max_ask":   float(_c("max_premium") or 320),
+                "max_tv":    float(_c("max_time_value") or 220),
+                "max_spread_pct": float(_c("price_diff_percent") or 5),
+                "buffer_pts": float(self._ob_tf_cfg(self._active_ob_tf or "15m", "tolerance") or 100),
+            },
+            "targets": {
+                "partial_trigger_price": round(self.partial_trigger_price, 2),
+                "full_close_price":      round(self.full_close_price, 2),
+                "session_target":        float(_c("session_pnl_target") or _c("full_close_target") or 600),
+                "partial_ratio":         float(_c("partial_profit_ratio") or 1.1),
+            },
+        })
 
         # Persist ALL trades to structured SQLite paper_trades table
         # Pass the exact execution timestamp so DB records match actual order time.
@@ -1711,6 +1790,12 @@ class BaseExecutor:
             "ob_wait_active":           self._ob_wait_active,
             "ob_wait_since":            self._ob_wait_since,
             "ob_wait_reason":           self._ob_wait_reason,
+            "active_ob_tf":             self._active_ob_tf,
+            "session_obs_summary":      {
+                tf: bool(self._session_obs.get(tf, {}).get(
+                    "demand" if self.direction == "BULLISH" else "supply"))
+                for tf in _OB_TFS
+            },
             "eligible":                 self.eligible_today,
             "trigger_type":             self.trigger_type,
             "triggered":                self.triggered,
@@ -1742,6 +1827,9 @@ class BaseExecutor:
             "zone_price_snap":          self.zone_price_snap,
             # Full analysis report for "Check Details" panel
             "analysis_report":          self.analysis_report,
+            # Session realized PnL (persists after partial booking for display)
+            "session_realized_futures_pnl": round(self.session_realized_futures_pnl, 2),
+            "session_realized_hedge_pnl":   round(self.session_realized_hedge_pnl,   2),
             # Management
             "partial_done":             self.partial_done,
             # Trigger history (last 20, newest first)
@@ -1816,9 +1904,12 @@ class BaseExecutor:
             "ts_ist":  ist_now_str(),
         }, source=self.name)
 
-    async def _log_session_event(self, event_type: str, message: str = ""):
-        """Persist a key event to session_event_log for historical review."""
+    async def _log_session_event(self, event_type: str, message = ""):
+        """Persist a key event to session_event_log. message can be str or dict (auto JSON-encoded)."""
         try:
+            import json as _json
+            if isinstance(message, dict):
+                message = _json.dumps(message)
             _exp_h   = int(getattr(cfg, "session_expiry_h", 13))
             _exp_m   = int(getattr(cfg, "session_expiry_m", 30))
             ses_day  = get_session_day(ist_now(), _exp_h, _exp_m)
@@ -1835,44 +1926,139 @@ class BaseExecutor:
         except Exception as e:
             self.log.debug(f"_log_session_event failed: {e}")
 
+    async def _log_window_open_snapshot(self, price: float):
+        """Log structured snapshot of all 4 TF OB zones at window open."""
+        try:
+            import json as _json
+            zone_type = "demand" if self.direction == "BULLISH" else "supply"
+            def _ci(k, d): v = self._cfg(k); return int(v) if v is not None else d
+            def _cf(k, d): v = self._cfg(k); return float(v) if v is not None else d
+            zones = {}
+            for tf in ("5m", "15m", "1h", "4h"):
+                z = self._session_obs.get(tf, {}).get(zone_type)
+                if not z:
+                    continue
+                zones[tf] = {
+                    "bottom":   round(float(z.get("bottom") or 0), 1),
+                    "top":      round(float(z.get("top")    or 0), 1),
+                    "mid":      round(float(z.get("mid")    or 0), 1),
+                    "grade":    z.get("grade", ""),
+                    "score":    round(float(z.get("score")  or 0), 2),
+                    "age_bars": int(z.get("age_bars") or 0),
+                    "buffer":   float(self._ob_tf_cfg(tf, "tolerance") or 100),
+                    "max_ask":  float(self._ob_tf_cfg(tf, "max_premium") or 320),
+                    "max_tv":   float(self._ob_tf_cfg(tf, "max_time_value") or 220),
+                    "qty":      float(self._ob_tf_cfg(tf, "qty") or 1),
+                }
+            await self._log_session_event("window_open_snapshot", {
+                "price_at_open": round(price, 1),
+                "direction":     self.direction,
+                "window_open":   f"{_ci('trade_start_h',4):02d}:{_ci('trade_start_m',0):02d}",
+                "window_close":  f"{_ci('trade_end_h',18):02d}:{_ci('trade_end_m',30):02d}",
+                "squareoff":     f"{_ci('force_close_h',18):02d}:{_ci('force_close_m',30):02d}",
+                "session_target":_cf('session_pnl_target', 0) or _cf('full_close_target', 600),
+                "spread_max":    _cf('price_diff_percent', 5),
+                "zones":         zones,
+            })
+        except Exception as e:
+            self.log.debug(f"_log_window_open_snapshot failed: {e}")
+
     async def _snapshot_loop(self):
-        """Save an enriched state snapshot every 5 minutes for session timeline review."""
+        """Every 5 min: structured condition snapshot for session journal review."""
         import asyncio as _aio
         while True:
             await _aio.sleep(300)
             try:
-                if not (self._in_window() or self.state not in (ExState.SLEEP,)):
+                if not self._in_window():
                     continue
-                price  = self.current_price
-                target = self.locked_high_line
-                dist   = f"{abs(price - target):.0f}pts" if target and price else "—"
+                price     = self.current_price
+                state_val = self.state.value
+                zone_type = "demand" if self.direction == "BULLISH" else "supply"
 
-                # Phase description
-                if self.state == ExState.SLEEP and self._ob_wait_active:
-                    phase = f"OB_WAIT since {self._ob_wait_since[11:16] if self._ob_wait_since else '?'}"
-                elif self.state == ExState.SLEEP and target:
-                    phase = f"WATCHING target=${target:.0f} dist={dist}"
-                elif self.state == ExState.VERIFY_HEDGE_LOOP:
-                    fc = self._verify_fail_counts
-                    total = sum(fc.values())
-                    phase = (f"VERIFY_LOOP iter={total} "
-                             f"prox={fc['prox']} prem={fc['prem']} "
-                             f"tv={fc['tv']} spread={fc['spread']} "
-                             f"last=[{self._verify_last_fail or 'ok'}]")
-                elif self.state == ExState.MANAGING_POSITION:
+                # Fetch nearest ITM option for condition values
+                itm_data = None
+                try:
+                    from backend.data.options_feed import get_nearest_itm_put, get_nearest_itm_call
+                    raw = (get_nearest_itm_put(price) if self._option_side == "P"
+                           else get_nearest_itm_call(price))
+                    if raw:
+                        intr = max(raw["strike"] - price, 0) if self._option_side == "P" \
+                               else max(price - raw["strike"], 0)
+                        tv   = round(max((raw.get("ask") or 0) - intr, 0), 2)
+                        sprd = round(abs((raw.get("ask") or 0) - (raw.get("mark") or 0))
+                                     / max(raw.get("mark") or 1, 1) * 100, 2)
+                        itm_data = {
+                            "ask":        round(float(raw.get("ask") or 0), 2),
+                            "tv":         tv,
+                            "spread_pct": sprd,
+                            "strike":     raw.get("strike"),
+                        }
+                except Exception:
+                    pass
+
+                # Per-TF condition snapshot
+                tf_snap = {}
+                for tf in ("5m", "15m", "1h", "4h"):
+                    z = self._session_obs.get(tf, {}).get(zone_type)
+                    if not z:
+                        tf_snap[tf] = {"no_zone": True}
+                        continue
+                    mid   = float(z.get("mid") or ((z.get("top", 0) + z.get("bottom", 0)) / 2))
+                    z_top = float(z.get("top", mid))
+                    z_bot = float(z.get("bottom", mid))
+                    tol   = float(self._ob_tf_cfg(tf, "tolerance") or 100)
+                    maxP  = float(self._ob_tf_cfg(tf, "max_premium") or 320)
+                    maxTV = float(self._ob_tf_cfg(tf, "max_time_value") or 220)
+                    maxSp = float(self._cfg("price_diff_percent") or 5)
+
+                    in_zone    = price >= z_bot and price <= z_top if price else False
+                    # Points from nearest zone edge (0 if inside)
+                    if price and price > z_top:
+                        edge_pts = round(price - z_top, 0)
+                        edge_dir = "above"
+                    elif price and price < z_bot:
+                        edge_pts = round(z_bot - price, 0)
+                        edge_dir = "below"
+                    else:
+                        edge_pts = 0
+                        edge_dir = "inside"
+
+                    prem_ok = (itm_data["ask"] <= maxP)   if itm_data and itm_data["ask"] else None
+                    tv_ok   = (itm_data["tv"]  <= maxTV)  if itm_data and itm_data["tv"] is not None else None
+                    sprd_ok = (itm_data["spread_pct"] <= maxSp) if itm_data else None
+                    all_ok  = bool(in_zone and prem_ok and tv_ok and sprd_ok)
+
+                    tf_snap[tf] = {
+                        "mid": round(mid, 0), "top": round(z_top, 0), "bottom": round(z_bot, 0),
+                        "buffer": tol, "in_zone": in_zone,
+                        "edge_pts": edge_pts, "edge_dir": edge_dir,
+                        "prem_ok": prem_ok, "ask": itm_data["ask"] if itm_data else None, "max_ask": maxP,
+                        "tv_ok":   tv_ok,   "tv":  itm_data["tv"]  if itm_data else None, "max_tv":  maxTV,
+                        "sprd_ok": sprd_ok, "sprd": itm_data["spread_pct"] if itm_data else None, "max_sprd": maxSp,
+                        "all_ok":  all_ok,
+                    }
+
+                # Phase summary
+                if self.state == ExState.MANAGING_POSITION:
                     fut_pnl = self._futures_unrealized_pnl(price, self.futures_remaining_qty)
-                    phase   = (f"MANAGING fut_pnl={fut_pnl:+.2f} "
-                               f"peak={self._peak_unrealized_pnl:+.2f} "
-                               f"entry={self.futures_entry_price:.0f}")
+                    phase   = f"MANAGING fut_pnl={fut_pnl:+.2f} entry={self.futures_entry_price:.0f}"
+                elif self.state == ExState.VERIFY_HEDGE_LOOP:
+                    fc    = self._verify_fail_counts
+                    phase = f"VERIFYING tf={self._active_ob_tf} fails: prox={fc['prox']} prem={fc['prem']} tv={fc['tv']}"
+                elif self._ob_wait_active:
+                    phase = f"OB_WAIT — no zone at open, watching for new candle"
                 else:
-                    phase = self.state.value
+                    in_tfs = [t for t, v in tf_snap.items() if v.get("in_zone")]
+                    phase  = f"WATCHING — price in zone: {in_tfs or 'none'}"
 
-                await self._log_session_event(
-                    "snapshot",
-                    f"{phase} | price={price:.0f} "
-                    f"target={'$'+str(int(target)) if target else 'none'} "
-                    f"dist={dist} eligible={self.eligible_today}"
-                )
+                await self._log_session_event("condition_snapshot", {
+                    "phase":     phase,
+                    "state":     state_val,
+                    "price":     round(price, 1),
+                    "active_tf": self._active_ob_tf,
+                    "itm":       itm_data,
+                    "tf_snap":   tf_snap,
+                })
             except Exception:
                 pass
 
@@ -2061,6 +2247,8 @@ class BaseExecutor:
         self._ob_wait_since        = ""
         self._ob_wait_reason       = ""
         self._last_ob_candle_ts    = 0
+        self._session_obs          = {}
+        self._active_ob_tf         = ""
         # ── Persist both paper engine and executor state to DB ────────────
         if self._paper is not None:
             await self._paper.save_state()                 # ensures cleared positions survive restart
@@ -2095,6 +2283,8 @@ class BaseExecutor:
         self._ob_wait_since      = ""
         self._ob_wait_reason     = ""
         self._last_ob_candle_ts  = 0
+        self._session_obs        = {}
+        self._active_ob_tf       = ""
         # In pre-execution states: go back to SLEEP so analysis re-runs immediately
         _pre_exec = {ExState.SLEEP, ExState.CHECK_ELIGIBILITY,
                      ExState.WAIT_TRIGGER, ExState.VERIFY_HEDGE_LOOP}
@@ -2153,10 +2343,12 @@ class BaseExecutor:
         self.locked_low_line     = None
         self.high_line           = None   # clear display lines too
         self.low_line            = None
-        self._ob_wait_active     = False  # clear OB wait state for new session
+        self._ob_wait_active     = False
         self._ob_wait_since      = ""
         self._ob_wait_reason     = ""
         self._last_ob_candle_ts  = 0
+        self._session_obs        = {}
+        self._active_ob_tf       = ""
         # Preserve analysis_report within the same session so the panel still shows
         # the last known OB zone during brief gaps between retries.
         # Only wipe it when the SESSION changes (not at calendar midnight).
@@ -2246,6 +2438,8 @@ class BaseExecutor:
             "ob_wait_since":                   self._ob_wait_since,
             "ob_wait_reason":                  self._ob_wait_reason,
             "last_ob_candle_ts":               self._last_ob_candle_ts,
+            "session_obs":                     self._session_obs,
+            "active_ob_tf":                    self._active_ob_tf,
         }
 
     def _restore_state(self, s: dict):
@@ -2306,6 +2500,8 @@ class BaseExecutor:
             self._ob_wait_since               = s.get("ob_wait_since", "")
             self._ob_wait_reason              = s.get("ob_wait_reason", "")
             self._last_ob_candle_ts           = s.get("last_ob_candle_ts", 0)
+            self._session_obs                 = s.get("session_obs", {})
+            self._active_ob_tf                = s.get("active_ob_tf", "")
             # If restoring mid-verification, reset timer to NOW so timeout is fresh
             if self.state == ExState.VERIFY_HEDGE_LOOP:
                 self._verify_start_time = time.time()

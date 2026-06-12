@@ -2,8 +2,8 @@
 Bullish Hedge Executor.
 Strategy: LONG futures + nearest ITM PUT as hedge.
 
-At window open: fetches nearest demand Order Block zone.
-Entry when price within ±max_distance_from_line of zone mid AND option conditions pass.
+At window open: snapshots nearest demand OB zone on all 4 TFs (5m/15m/1h/4h).
+Entry when price enters any zone's tolerance window; smallest TF takes priority.
 """
 
 from backend.agents.base_executor import BaseExecutor
@@ -32,9 +32,6 @@ class BullishExecutor(BaseExecutor):
     def _option_side(self) -> str:
         return "P"
 
-    def _is_eligible(self, price: float, target_line: float) -> bool:
-        """Eligible when price is within max_distance_from_line of the demand OB mid."""
-        max_dist = self._cfg("max_distance_from_line") or 100.0
-        return abs(price - target_line) <= max_dist
-
-
+    def _is_eligible(self, price: float, _target_line: float) -> bool:
+        """Eligible when price is within tolerance of any demand OB zone (smallest TF wins)."""
+        return self._find_active_ob_tf(price) is not None

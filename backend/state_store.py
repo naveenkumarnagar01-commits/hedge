@@ -149,6 +149,26 @@ CREATE TABLE IF NOT EXISTS ob_zone_lifecycle (
     UNIQUE(tf, zone_type, born_ts)
 );
 CREATE INDEX IF NOT EXISTS idx_obzl_tf_active ON ob_zone_lifecycle(tf, zone_type, is_active);
+
+CREATE TABLE IF NOT EXISTS ob_daily_snapshot (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    snapshot_date   TEXT    NOT NULL,
+    snapshot_time   TEXT    NOT NULL,
+    tf              TEXT    NOT NULL,
+    zone_type       TEXT    NOT NULL,
+    zone_top        REAL,
+    zone_bottom     REAL,
+    zone_mid        REAL,
+    zone_score      REAL,
+    zone_grade      TEXT,
+    born_ts         INTEGER,
+    age_bars        INTEGER,
+    distance_pct    REAL,
+    current_price   REAL,
+    created_at      REAL    DEFAULT (strftime('%s','now')),
+    UNIQUE(snapshot_date, snapshot_time, tf, zone_type, born_ts)
+);
+CREATE INDEX IF NOT EXISTS idx_obs_date ON ob_daily_snapshot(snapshot_date DESC);
 """
 
 
@@ -386,7 +406,7 @@ class StateStore:
             log.error(f"get_sessions error: {e}")
             return []
 
-    def _sqlite_get_sessions_filtered(self, trader_name: str, from_date: str, to_date: str, limit: int) -> list:
+    def _sqlite_get_sessions_filtered(self, trader_name: str, from_date: str, to_date: str, limit: int, today_ist: str = "") -> list:
         with sqlite3.connect(self._db_path) as c:
             c.row_factory = sqlite3.Row
 
@@ -408,8 +428,9 @@ class StateStore:
                 FROM trading_sessions {where_a}"""
 
             # ── Part B: no-trade activity days (events exist, no session row) ──
-            # A "no-trade day" = session_event_log has rows for that trader+date
-            # but trading_sessions does NOT have a row for that same trader+date.
+            # If session_date == today_ist (window currently open, no trade yet) → status='open'
+            # so the journal shows it as "CURRENT SESSION ● RUNNING".
+            # Past no-trade days stay status='no_trade'.
             conds_b, params_b = [], []
             if trader_name and trader_name.lower() != "all":
                 conds_b.append("e.trader_name=?"); params_b.append(trader_name)
@@ -418,6 +439,7 @@ class StateStore:
             if to_date:
                 conds_b.append("e.session_date <= ?"); params_b.append(to_date)
             where_b = ("WHERE " + " AND ".join(conds_b) + " AND ") if conds_b else "WHERE "
+            params_b.append(today_ist)  # for the CASE expression
             q_b = f"""
                 SELECT
                     'notrade_' || e.trader_name || '_' || e.session_date AS session_id,
@@ -432,7 +454,7 @@ class StateStore:
                     0.0 AS futures_pnl,
                     0.0 AS hedge_pnl,
                     0.0 AS total_pnl,
-                    'no_trade' AS status,
+                    CASE WHEN e.session_date = ? THEN 'open' ELSE 'no_trade' END AS status,
                     MIN(e.created_at) AS created_at,
                     0 AS is_force_closed
                 FROM session_event_log e
@@ -451,7 +473,12 @@ class StateStore:
         if not self._db_path: return []
         loop = asyncio.get_running_loop()
         try:
-            return await loop.run_in_executor(_pool, self._sqlite_get_sessions_filtered, trader_name, from_date, to_date, limit)
+            from backend.utils import ist_now as _isn
+            today_ist = _isn().strftime("%Y-%m-%d")
+            return await loop.run_in_executor(
+                _pool, self._sqlite_get_sessions_filtered,
+                trader_name, from_date, to_date, limit, today_ist
+            )
         except Exception:
             return []
 
@@ -666,10 +693,26 @@ class StateStore:
 
             if session_id.startswith("notrade_"):
                 # Format: notrade_{trader_name}_{YYYY-MM-DD}
-                # Last 10 chars = date, everything between prefix and date = trader_name
                 date_str    = session_id[-10:]
-                trader_name = session_id[len("notrade_"):-11]  # strip prefix + '_' + date
+                trader_name = session_id[len("notrade_"):-11]
                 candidates  = [date_str]
+            elif session_id.startswith("vol_"):
+                # Volatile: session_id = 'vol_{evt_id}' — date comes from trading_sessions
+                row = c.execute(
+                    "SELECT trader_name, session_date FROM trading_sessions WHERE session_id=?",
+                    (session_id,)
+                ).fetchone()
+                if not row:
+                    return []
+                trader_name = row["trader_name"]
+                date_str    = row["session_date"] or ""
+                try:
+                    d = datetime.strptime(date_str, "%Y-%m-%d")
+                    candidates = [date_str, (d - timedelta(days=1)).strftime("%Y-%m-%d")]
+                except Exception:
+                    candidates = [date_str] if date_str else []
+                if not candidates:
+                    return []
             else:
                 # Real session: first 10 chars = date portion
                 date_str = session_id[:10]
@@ -944,5 +987,87 @@ class StateStore:
             log.error(f"get_ob_lifecycle error: {e}")
             return []
 
+    # ── OB Daily Snapshot ──────────────────────────────────────────────────
+
+    def _sqlite_save_ob_daily_snapshot(self, rows: list):
+        with sqlite3.connect(self._db_path) as c:
+            for r in rows:
+                c.execute(
+                    """INSERT OR IGNORE INTO ob_daily_snapshot
+                       (snapshot_date, snapshot_time, tf, zone_type, zone_top, zone_bottom,
+                        zone_mid, zone_score, zone_grade, born_ts, age_bars, distance_pct, current_price)
+                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    (r["snapshot_date"], r["snapshot_time"], r["tf"], r["zone_type"],
+                     r.get("zone_top"), r.get("zone_bottom"), r.get("zone_mid"),
+                     r.get("zone_score"), r.get("zone_grade"), r.get("born_ts"),
+                     r.get("age_bars"), r.get("distance_pct"), r.get("current_price"))
+                )
+
+    async def save_ob_daily_snapshot(self, rows: list):
+        if not self._db_path or not rows:
+            return
+        loop = asyncio.get_running_loop()
+        try:
+            await loop.run_in_executor(_pool, self._sqlite_save_ob_daily_snapshot, rows)
+        except Exception as e:
+            log.error(f"save_ob_daily_snapshot error: {e}")
+
+    def _sqlite_get_ob_daily_snapshots(self, date: str, tf: str, limit: int) -> list:
+        with sqlite3.connect(self._db_path) as c:
+            c.row_factory = sqlite3.Row
+            clauses, params = [], []
+            if date:
+                clauses.append("snapshot_date=?")
+                params.append(date)
+            if tf:
+                clauses.append("tf=?")
+                params.append(tf)
+            where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
+            # Fetch ordered by distance ascending so the nearest row per type comes first
+            res = c.execute(
+                f"SELECT * FROM ob_daily_snapshot {where} ORDER BY snapshot_date DESC, distance_pct ASC",
+                params
+            ).fetchall()
+
+        # Keep only nearest 1 per (snapshot_date, snapshot_time, tf, zone_type)
+        seen: set = set()
+        result = []
+        for r in (dict(row) for row in res):
+            key = (r.get("snapshot_date"), r.get("snapshot_time"), r.get("tf"), r.get("zone_type"))
+            if key not in seen:
+                seen.add(key)
+                result.append(r)
+        return result[:limit] if limit else result
+
+    async def get_ob_daily_snapshots(self, date: str = "", tf: str = "", limit: int = 200) -> list:
+        if not self._db_path:
+            return []
+        loop = asyncio.get_running_loop()
+        try:
+            return await loop.run_in_executor(
+                _pool, self._sqlite_get_ob_daily_snapshots, date, tf, limit
+            )
+        except Exception as e:
+            log.error(f"get_ob_daily_snapshots error: {e}")
+            return []
+
+    def _sqlite_get_ob_snapshot_dates(self, limit: int) -> list:
+        with sqlite3.connect(self._db_path) as c:
+            res = c.execute(
+                "SELECT DISTINCT snapshot_date, snapshot_time FROM ob_daily_snapshot ORDER BY snapshot_date DESC LIMIT ?",
+                (limit,)
+            ).fetchall()
+        return [{"date": r[0], "time": r[1]} for r in res]
+
+    async def get_ob_snapshot_dates(self, limit: int = 60) -> list:
+        if not self._db_path:
+            return []
+        loop = asyncio.get_running_loop()
+        try:
+            return await loop.run_in_executor(_pool, self._sqlite_get_ob_snapshot_dates, limit)
+        except Exception as e:
+            log.error(f"get_ob_snapshot_dates error: {e}")
+            return []
 
 store = StateStore()
+

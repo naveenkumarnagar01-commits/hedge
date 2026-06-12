@@ -99,10 +99,50 @@ class Config:
     ob_max_thickness_atr: float = 1.65  # max zone height in ATR units
     ob_sensitivity:      str   = "Balanced"  # Conservative / Balanced / Aggressive
     ob_candle_count:     int   = 500     # candles to analyse
-    ob_tf:               str   = "15m"   # timeframe for analysis (traders + OB tab default)
-    bull_ob_tf:          str   = ""      # per-trader override; empty = use global ob_tf
-    bear_ob_tf:          str   = ""
+    ob_tf:               str   = "15m"   # timeframe for OB tab display default
     vol_ob_tf:           str   = ""
+    ob_snapshot_h:       int   = 15      # Daily snapshot hour (0-23)
+    ob_snapshot_m:       int   = 5       # Daily snapshot minute (0-59)
+
+    # ── Bullish Trader — per-TF OB settings (tolerance = ±pts from zone mid) ──
+    bull_ob_5m_tolerance:    float = 30.0
+    bull_ob_15m_tolerance:   float = 60.0
+    bull_ob_1h_tolerance:    float = 100.0
+    bull_ob_4h_tolerance:    float = 150.0
+    bull_ob_5m_max_premium:       float = 150.0
+    bull_ob_15m_max_premium:      float = 220.0
+    bull_ob_1h_max_premium:       float = 280.0
+    bull_ob_4h_max_premium:       float = 320.0
+    bull_ob_5m_max_time_value:    float = 100.0
+    bull_ob_15m_max_time_value:   float = 150.0
+    bull_ob_1h_max_time_value:    float = 180.0
+    bull_ob_4h_max_time_value:    float = 220.0
+    bull_ob_5m_qty:               float = 1.0
+    bull_ob_15m_qty:              float = 1.0
+    bull_ob_1h_qty:               float = 1.0
+    bull_ob_4h_qty:               float = 1.0
+
+    # ── Bearish Trader — per-TF OB settings ───────────────────────────────
+    bear_ob_5m_tolerance:         float = 30.0
+    bear_ob_15m_tolerance:        float = 60.0
+    bear_ob_1h_tolerance:         float = 100.0
+    bear_ob_4h_tolerance:         float = 150.0
+    bear_ob_5m_max_premium:       float = 150.0
+    bear_ob_15m_max_premium:      float = 220.0
+    bear_ob_1h_max_premium:       float = 280.0
+    bear_ob_4h_max_premium:       float = 320.0
+    bear_ob_5m_max_time_value:    float = 100.0
+    bear_ob_15m_max_time_value:   float = 150.0
+    bear_ob_1h_max_time_value:    float = 180.0
+    bear_ob_4h_max_time_value:    float = 220.0
+    bear_ob_5m_qty:               float = 1.0
+    bear_ob_15m_qty:              float = 1.0
+    bear_ob_1h_qty:               float = 1.0
+    bear_ob_4h_qty:               float = 1.0
+
+    # Legacy keys kept for backward compat (no longer used for OB trading)
+    bull_ob_tf:          str   = ""
+    bear_ob_tf:          str   = ""
 
     # ── Volatile Event Trader ──────────────────────────────────────────────
     vol_skip_weekends:   bool = False

@@ -3,13 +3,13 @@ Hedge Platform - Backend Entry Point.
 
 Agents:
   - Spot + Futures + Options WebSocket feeds
-  - AnalystAgent     : daily line computation (configurable IST time), runs at startup too
+  - AnalystAgent     : daily line computation (configurable IST time)
   - ManagerAgent     : risk gate for position size
   - BullishExecutor  : paper - long futures + ITM PUT hedge
   - BearishExecutor  : paper - short futures + ITM CALL hedge
+  - VolatileTrader   : event-driven straddle
 
 Run:
-  cd hedge_platform
   python -m backend.main
 """
 
@@ -17,35 +17,102 @@ import asyncio
 import logging
 import os
 import sys
+import shutil
+import signal
+from datetime import datetime, timedelta
+from logging.handlers import TimedRotatingFileHandler
+from pathlib import Path
 
-# Fix: python -m does NOT add backend.main to sys.modules (only __main__).
-# gateway.py uses lazy 'import backend.main as m' which would re-import it
-# fresh (new executor instances, price=0, no state) without this line.
+# ── Load .env FIRST (before anything else) ──────────────────────────────────
+try:
+    from dotenv import load_dotenv
+    _env_file = Path(__file__).parent.parent / ".env"
+    if _env_file.exists():
+        load_dotenv(_env_file)
+        print(f"[main] Loaded .env from {_env_file}")
+    else:
+        print("[main] No .env file found — using system environment variables.")
+except ImportError:
+    print("[main] python-dotenv not installed — skipping .env load.")
+
+# ── Timezone: set IST before any time operations ────────────────────────────
+if not os.environ.get("TZ"):
+    os.environ["TZ"] = "Asia/Kolkata"
+try:
+    import time as _time
+    _time.tzset()
+except AttributeError:
+    pass  # Windows — TZ env var is enough for most libs
+
+# ── Fix: python -m does NOT add backend.main to sys.modules ─────────────────
 if "backend.main" not in sys.modules:
     sys.modules["backend.main"] = sys.modules[__name__]
 
-import uvicorn
-
-from backend.message_bus import bus
-from backend.config import cfg
-from backend.state_store import store
-from backend.utils import ist_now, ist_now_str
-
-# Force UTF-8 on Windows console to avoid UnicodeEncodeError from log messages
+# ── UTF-8 console on Windows ─────────────────────────────────────────────────
 if sys.stdout.encoding and sys.stdout.encoding.lower() != "utf-8":
     try:
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     except Exception:
         pass
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(name)-22s] %(levelname)s: %(message)s",
-    handlers=[logging.StreamHandler(sys.stdout)],
-)
+import uvicorn
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# LOGGING SETUP — console + daily rotating file
+# ═══════════════════════════════════════════════════════════════════════════
+
+def _setup_logging():
+    log_level_name = os.environ.get("LOG_LEVEL", "INFO").upper()
+    log_level = getattr(logging, log_level_name, logging.INFO)
+
+    fmt = logging.Formatter(
+        "%(asctime)s [%(name)-22s] %(levelname)s: %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
+
+    handlers = [logging.StreamHandler(sys.stdout)]
+
+    # Daily rotating log file
+    log_dir = Path(os.environ.get("LOG_DIR", Path(__file__).parent.parent / "logs"))
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_file = log_dir / "hedge_trader.log"
+    file_handler = TimedRotatingFileHandler(
+        filename=str(log_file),
+        when="midnight",
+        interval=1,
+        backupCount=30,          # keep 30 days
+        encoding="utf-8",
+        utc=False,
+    )
+    file_handler.suffix = "%Y-%m-%d"
+    handlers.append(file_handler)
+
+    for h in handlers:
+        h.setFormatter(fmt)
+
+    root = logging.getLogger()
+    root.setLevel(log_level)
+    for h in root.handlers[:]:
+        root.removeHandler(h)
+    for h in handlers:
+        root.addHandler(h)
+
+    return log_dir
+
+log_dir = _setup_logging()
 log = logging.getLogger("main")
 
-# ── Agent singletons ──────────────────────────────────────────────────────────
+
+# ═══════════════════════════════════════════════════════════════════════════
+# AGENT SINGLETONS
+# ═══════════════════════════════════════════════════════════════════════════
+
+from backend.message_bus import bus
+from backend.config import cfg
+from backend.state_store import store
+from backend.utils import ist_now, ist_now_str
+
 from backend.agents.analyst          import analyst
 from backend.agents.manager          import manager
 from backend.agents.bullish_executor import BullishExecutor
@@ -55,7 +122,6 @@ from backend.execution.paper_engine  import PaperEngine
 from backend.data.event_calendar     import event_calendar
 from backend.data.ob_tracker         import ob_tracker
 
-# Each trader has an INDEPENDENT $100k virtual balance — no shared state
 _bull_paper = PaperEngine(); _bull_paper._state_key = "paper_engine_state_bull"
 _bear_paper = PaperEngine(); _bear_paper._state_key = "paper_engine_state_bear"
 _vol_paper  = PaperEngine(); _vol_paper._state_key  = "paper_engine_state_vol"
@@ -65,26 +131,22 @@ bearish  = BearishExecutor(is_paper=True, force_window=False, paper_engine=_bear
 volatile = VolatileTrader( is_paper=True, paper_engine=_vol_paper)
 
 
+# ═══════════════════════════════════════════════════════════════════════════
+# BACKGROUND TASKS
+# ═══════════════════════════════════════════════════════════════════════════
+
 async def _squareoff_broadcaster(executor, h_key: str, m_key: str):
-    """
-    Fires SQUAREOFF_START for bull/bear at their configured force-close time.
-    Uses wall-clock sleep (safe for bull/bear whose windows are within a single
-    calendar day). VolatileTrader handles its own squareoff inside _step().
-    """
     from backend.message_bus import SQUAREOFF_START
-    from datetime import timedelta
     name = executor.name
     while True:
         try:
             now_ist = ist_now()
-            sq_h    = int(getattr(cfg, h_key) or 0)   # int() — never falsy-0 issue
+            sq_h    = int(getattr(cfg, h_key) or 0)
             sq_m    = int(getattr(cfg, m_key) or 0)
             sq_time = now_ist.replace(hour=sq_h, minute=sq_m, second=0, microsecond=0)
             if now_ist >= sq_time:
                 sq_time += timedelta(days=1)
-            wait_sec = (sq_time - now_ist).total_seconds()
-            # Clamp: always wait at least 60s to prevent tight-loop on bad config
-            wait_sec = max(wait_sec, 60)
+            wait_sec = max((sq_time - now_ist).total_seconds(), 60)
             log.info(f"[{name}] Squareoff in {wait_sec/3600:.2f}h at {sq_time.strftime('%H:%M')} IST")
             await asyncio.sleep(wait_sec)
             log.info(f"[{name}] Broadcasting SQUAREOFF_START")
@@ -107,18 +169,100 @@ async def _state_persister():
                 log.error(f"State persist failed for {ex.name}: {e}")
 
 
+async def _daily_db_backup():
+    """
+    Every day at 01:00 IST, copy hedge_state.db to backups/ folder.
+    Keeps last 30 daily backups.
+    """
+    backup_dir = Path(os.environ.get("BACKUP_DIR", Path(__file__).parent.parent / "backups"))
+    backup_dir.mkdir(parents=True, exist_ok=True)
+
+    while True:
+        try:
+            now = ist_now()
+            # Next 01:00 IST
+            target = now.replace(hour=1, minute=0, second=0, microsecond=0)
+            if now >= target:
+                target += timedelta(days=1)
+            wait_sec = (target - now).total_seconds()
+            log.info(f"[backup] Next DB backup in {wait_sec/3600:.1f}h at {target.strftime('%Y-%m-%d %H:%M IST')}")
+            await asyncio.sleep(wait_sec)
+
+            # Do backup
+            db_path = store._db_path
+            if db_path and Path(db_path).exists():
+                date_str  = ist_now().strftime("%Y-%m-%d")
+                dest_path = backup_dir / f"hedge_state_{date_str}.db"
+                shutil.copy2(db_path, dest_path)
+                log.info(f"[backup] DB backed up → {dest_path}")
+
+                # Clean old backups (keep 30)
+                backups = sorted(backup_dir.glob("hedge_state_*.db"))
+                for old in backups[:-30]:
+                    old.unlink()
+                    log.info(f"[backup] Deleted old backup: {old.name}")
+            else:
+                log.warning("[backup] DB file not found — skipping backup")
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            log.error(f"[backup] Daily backup failed: {e}")
+            await asyncio.sleep(3600)  # retry in 1h
+
+
+async def _health_monitor():
+    """
+    Every 30 min: log a heartbeat + send Telegram if feeds are down.
+    """
+    from backend.data import futures_feed
+    await asyncio.sleep(1800)  # first check after 30min
+    while True:
+        try:
+            now_str = ist_now_str()
+            price = getattr(futures_feed, "_last_price", 0)
+            states = {
+                "bull": bullish.state.value  if hasattr(bullish, "state")  else "?",
+                "bear": bearish.state.value  if hasattr(bearish, "state")  else "?",
+                "vol":  volatile._state.value if hasattr(volatile, "_state") else "?",
+            }
+            log.info(
+                f"[heartbeat] {now_str} | BTC={price:.0f} | "
+                f"bull={states['bull']} bear={states['bear']} vol={states['vol']}"
+            )
+
+            # Alert if price feed is stale (0 or unchanged for too long)
+            if price == 0:
+                from backend import telegram_alert as tg
+                tg.send(
+                    f"⚠️ <b>Feed Warning</b>\n"
+                    f"BTC price feed may be down (price=0)\n"
+                    f"Time: {now_str}"
+                )
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            log.error(f"[heartbeat] Monitor error: {e}")
+        await asyncio.sleep(1800)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# STARTUP / SHUTDOWN
+# ═══════════════════════════════════════════════════════════════════════════
+
 async def startup():
     from backend import telegram_alert as tg
 
     log.info("=" * 64)
     log.info("  HEDGE TRADER  -  3-Trader Platform")
     log.info("  Bull | Bear | Volatile — each $100k independent balance")
-    log.info(f"  {ist_now_str()}")
+    log.info(f"  Started: {ist_now_str()}")
+    log.info(f"  Log directory: {log_dir}")
     log.info("=" * 64)
 
     # 1. State store
     db_url = os.environ.get("DATABASE_URL", "")
     await store.connect(db_url)
+    log.info(f"DB path: {store._db_path}")
 
     # 2. Restore persisted user config
     user_cfg = store.get("user_config")
@@ -129,14 +273,14 @@ async def startup():
                     setattr(cfg, k, type(getattr(cfg, k))(v))
                 except Exception:
                     setattr(cfg, k, v)
-        log.info(f"User config restored: {len(user_cfg)} key(s) from database.")
+        log.info(f"User config restored: {len(user_cfg)} key(s)")
 
     # 3. Redis (optional)
     redis_url = os.environ.get("REDIS_URL", "")
     if redis_url:
         await bus.connect_redis(redis_url)
 
-    # 4. Data feeds (seed candles for all TFs used by traders
+    # 4. Data feeds
     from backend.data import spot_feed, futures_feed, options_feed
     await futures_feed.fetch_historical_candles(500, "5m")
     await futures_feed.fetch_historical_candles(500, "15m")
@@ -147,7 +291,7 @@ async def startup():
     await options_feed.start()
     log.info("WebSocket data feeds started.")
 
-    # 5. Event calendar (must start before volatile trader subscribes)
+    # 5. Event calendar
     await event_calendar.start()
 
     # 6. Agents
@@ -159,56 +303,118 @@ async def startup():
     log.info("All 3 traders started.")
     await ob_tracker.start()
 
-    # 6. Background tasks
+    # 7. Background tasks
     asyncio.create_task(_squareoff_broadcaster(bullish, "bull_force_close_h", "bull_force_close_m"))
     asyncio.create_task(_squareoff_broadcaster(bearish, "bear_force_close_h", "bear_force_close_m"))
-    # NOTE: VolatileTrader manages its own squareoff inside _step() — no broadcaster needed
     asyncio.create_task(_state_persister())
+    asyncio.create_task(_daily_db_backup())
+    asyncio.create_task(_health_monitor())
 
     log.info("System fully online.")
     log.info(f"  Bullish : {bullish.name}  (paper, 24/7)")
     log.info(f"  Bearish : {bearish.name}  (paper, 24/7)")
-    log.info(f"  Lines   : H={analyst.high_line}  L={analyst.low_line}")
+    log.info(f"  Volatile: {volatile.name} (paper, event-driven)")
     log.info("=" * 64)
 
     tg.send(
         f"✅ <b>Hedge Trader ONLINE</b>\n"
-        f"H-Line: <b>{analyst.high_line}</b>  |  L-Line: <b>{analyst.low_line}</b>\n"
+        f"Bull: <b>{bullish.name}</b>\n"
+        f"Bear: <b>{bearish.name}</b>\n"
+        f"Volatile: <b>{volatile.name}</b>\n"
         f"Time: {ist_now_str()}"
     )
 
 
 async def shutdown():
     from backend import telegram_alert as tg
-    log.info("Shutting down...")
+    log.info("Shutting down gracefully...")
     tg.send(f"🔴 <b>Hedge Trader OFFLINE</b>\nTime: {ist_now_str()}")
     from backend.data import spot_feed, futures_feed, options_feed
-    await spot_feed.stop()
-    await futures_feed.stop()
-    await options_feed.stop()
-    await analyst.stop()
-    await bullish.stop()
-    await bearish.stop()
-    await volatile.stop()
+    try:
+        await spot_feed.stop()
+        await futures_feed.stop()
+        await options_feed.stop()
+        await analyst.stop()
+        await bullish.stop()
+        await bearish.stop()
+        await volatile.stop()
+        # Final state save
+        for ex in (bullish, bearish, volatile):
+            try:
+                await store.set(f"{ex.name}_state", ex._serialize())
+            except Exception:
+                pass
+    except Exception as e:
+        log.error(f"Shutdown error: {e}")
+    log.info("Shutdown complete.")
 
 
-# ── FastAPI app ───────────────────────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════
+# GLOBAL EXCEPTION HANDLER — catch all uncaught async exceptions
+# ═══════════════════════════════════════════════════════════════════════════
+
+def _handle_exception(loop, context):
+    msg = context.get("exception", context["message"])
+    log.error(f"[asyncio] Uncaught exception: {msg}", exc_info=context.get("exception"))
+    from backend import telegram_alert as tg
+    tg.send(
+        f"🚨 <b>Hedge Trader ERROR</b>\n"
+        f"{str(msg)[:400]}\n"
+        f"Time: {ist_now_str()}"
+    )
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# FASTAPI APP
+# ═══════════════════════════════════════════════════════════════════════════
+
 from backend.api.gateway import app
+
 
 @app.on_event("startup")
 async def fastapi_startup():
+    loop = asyncio.get_event_loop()
+    loop.set_exception_handler(_handle_exception)
     await startup()
+
 
 @app.on_event("shutdown")
 async def fastapi_shutdown():
     await shutdown()
 
 
+# ── Health check endpoint ──────────────────────────────────────────────────
+@app.get("/health")
+async def health_check():
+    from backend.data import futures_feed
+    price = getattr(futures_feed, "_last_price", 0)
+    return {
+        "status":   "ok",
+        "ts_ist":   ist_now_str(),
+        "btc_price": price,
+        "traders": {
+            "bull": bullish.state.value  if hasattr(bullish,  "state")  else "?",
+            "bear": bearish.state.value  if hasattr(bearish,  "state")  else "?",
+            "vol":  volatile._state.value if hasattr(volatile, "_state") else "?",
+        },
+    }
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# ENTRY POINT
+# ═══════════════════════════════════════════════════════════════════════════
+
 if __name__ == "__main__":
     host = os.environ.get("HOST", "0.0.0.0")
     port = int(os.environ.get("PORT", "8000"))
+
+    log.info(f"Starting uvicorn on {host}:{port}")
+
     uvicorn.run(
-        app,          # pass object, not string — prevents double-import of backend.main
-        host=host, port=port,
-        log_level="info", reload=False,
+        app,
+        host=host,
+        port=port,
+        log_level=os.environ.get("LOG_LEVEL", "info").lower(),
+        reload=False,
+        access_log=True,
     )

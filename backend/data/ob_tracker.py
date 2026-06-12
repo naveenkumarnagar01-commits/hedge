@@ -103,11 +103,13 @@ class OBTracker:
 
     def __init__(self):
         self._last_candle_ts: Dict[str, int] = {}
+        self._last_snapshot_key: str = ""   # "YYYY-MM-DD_HH:MM"
 
     async def start(self):
         bus.subscribe(CANDLE_CLOSE, self._on_candle_close)
         await _load_active_from_db()
         asyncio.create_task(self._initial_scan())
+        asyncio.create_task(self._snapshot_scheduler())
         log.info("OBTracker started — 5m/15m/1h/4h zone lifecycle tracking active.")
 
     async def _on_candle_close(self, msg: dict):
@@ -137,6 +139,96 @@ class OBTracker:
             except Exception as e:
                 log.debug(f"OBTracker initial {tf}: {e}")
         log.info("OBTracker initial scan complete.")
+        # Take a startup snapshot if today's is missing and we're past the configured time
+        await self._startup_snapshot_check()
 
+    async def _startup_snapshot_check(self):
+        """On startup: if today's configured-time snapshot is missing, take one now."""
+        from backend.utils import ist_now
+        try:
+            now       = ist_now()
+            snap_h    = int(getattr(cfg, "ob_snapshot_h", 4))
+            snap_m    = int(getattr(cfg, "ob_snapshot_m", 0))
+            today_str = now.strftime("%Y-%m-%d")
+            snap_key  = f"{today_str}_{snap_h:02d}:{snap_m:02d}"
+            now_mins  = now.hour * 60 + now.minute
+            snap_mins = snap_h * 60 + snap_m
+
+            if now_mins >= snap_mins:
+                existing    = await store.get_ob_snapshot_dates(limit=60)
+                today_exists = any(r.get("date") == today_str for r in existing)
+                if not today_exists:
+                    log.info(f"OBTracker: startup recovery — no snapshot for {today_str}, taking one now")
+                    await self._take_snapshot(today_str, now.strftime("%H:%M"))
+                    self._last_snapshot_key = snap_key
+        except Exception as e:
+            log.error(f"OBTracker startup snapshot check error: {e}")
+
+    async def _snapshot_scheduler(self):
+        """Poll every 30s. Tracks date+time key so config changes fire a new snapshot."""
+        from backend.utils import ist_now
+        await asyncio.sleep(20)
+        while True:
+            try:
+                now       = ist_now()
+                snap_h    = int(getattr(cfg, "ob_snapshot_h", 4))
+                snap_m    = int(getattr(cfg, "ob_snapshot_m", 0))
+                today_str = now.strftime("%Y-%m-%d")
+                snap_key  = f"{today_str}_{snap_h:02d}:{snap_m:02d}"
+
+                if now.hour == snap_h and now.minute == snap_m:
+                    if self._last_snapshot_key != snap_key:
+                        await self._take_snapshot(today_str, f"{snap_h:02d}:{snap_m:02d}")
+                        self._last_snapshot_key = snap_key
+                        log.info(f"OBTracker: snapshot saved — {snap_key}")
+
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                log.error(f"OBTracker snapshot scheduler error: {e}")
+
+            await asyncio.sleep(30)
+
+    async def _take_snapshot(self, date_str: str, time_str: str):
+        from backend.data.futures_feed import get_candles, fetch_historical_candles
+        from backend.data.order_blocks import detect
+        
+        log.info(f"Taking daily OB snapshot for {date_str} {time_str} IST...")
+        rows = []
+        n = int(getattr(cfg, "ob_candle_count", 500))
+        
+        for tf in _TRACKED_TFS:
+            candles = get_candles(n, tf)
+            if len(candles) < max(n // 3, 10):
+                candles = await fetch_historical_candles(n, tf)
+            if not candles:
+                continue
+                
+            result = detect(candles)
+            current_price = float(candles[-1].get("close", 0)) if candles else 0.0
+            
+            for zone_type in ("demand", "supply"):
+                zones = result.get(zone_type, [])
+                nearest = zones[:1]   # only the nearest zone per type per TF
+                for z in nearest:
+                    rows.append({
+                        "snapshot_date": date_str,
+                        "snapshot_time": time_str,
+                        "tf": tf,
+                        "zone_type": zone_type,
+                        "zone_top": z.get("top"),
+                        "zone_bottom": z.get("bottom"),
+                        "zone_mid": z.get("mid"),
+                        "zone_score": z.get("score"),
+                        "zone_grade": z.get("grade"),
+                        "born_ts": z.get("born_ts"),
+                        "age_bars": z.get("age_bars"),
+                        "distance_pct": z.get("distance_pct"),
+                        "current_price": current_price
+                    })
+        
+        if rows:
+            await store.save_ob_daily_snapshot(rows)
+            log.info(f"Saved {len(rows)} zones in OB snapshot.")
 
 ob_tracker = OBTracker()

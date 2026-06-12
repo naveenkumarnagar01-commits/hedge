@@ -93,7 +93,8 @@ class VolatileTrader:
                 e["status"] = "unknown"
         return events
 
-    async def add_event(self, name: str, event_time_str: str) -> dict:
+    async def add_event(self, name: str, event_time_str: str,
+                        params: dict | None = None) -> dict:
         s = event_time_str.strip().replace("T", " ")
         try:
             et = datetime.strptime(s, "%Y-%m-%d %H:%M")
@@ -108,19 +109,31 @@ class VolatileTrader:
             "event_time": event_time_key,
             "status": "upcoming",
             "created_at": datetime.now(_IST).strftime("%Y-%m-%dT%H:%M"),
+            "params": params if params else {},
         }
         events = store.get(self.EVENTS_KEY) or []
-        # Deduplicate: skip if same name+time already exists
-        dup = any(
-            e["name"].strip().lower() == event["name"].lower() and
-            e["event_time"] == event_time_key
-            for e in events
+        existing = next(
+            (e for e in events
+             if e["name"].strip().lower() == event["name"].lower()
+             and e["event_time"] == event_time_key),
+            None,
         )
-        if dup:
+        if existing:
+            if params:
+                # User re-submitted with params — update existing event's params
+                existing["params"] = params
+                events.sort(key=lambda x: x["event_time"])
+                await store.set(self.EVENTS_KEY, events)
+                # Sync active event params if this is the currently active event
+                if self._active_event and self._active_event.get("id") == existing["id"]:
+                    self._active_event["params"] = params
+                    await self._save_state()
+                await self._log(f"Event params updated: '{existing['name']}' @ {event_time_key}")
+                await self._broadcast()
+                existing["_params_updated"] = True
+                return existing
             log.info(f"{self.name}: duplicate event skipped — '{event['name']}' @ {event_time_key}")
-            return next(e for e in events
-                        if e["event_time"] == event_time_key and
-                           e["name"].strip().lower() == event["name"].lower())
+            return existing
         events.append(event)
         events.sort(key=lambda x: x["event_time"])
         await store.set(self.EVENTS_KEY, events)
@@ -138,8 +151,9 @@ class VolatileTrader:
         await self._broadcast()          # instant frontend update
         return True
 
-    async def update_event(self, event_id: str, name: str, event_time_str: str) -> dict | None:
-        """Edit an existing event's name and/or time in-place."""
+    async def update_event(self, event_id: str, name: str, event_time_str: str,
+                           params: dict | None = None) -> dict | None:
+        """Edit an existing event's name, time and/or per-event params in-place."""
         events = store.get(self.EVENTS_KEY) or []
         target = next((e for e in events if e["id"] == event_id), None)
         if not target:
@@ -152,10 +166,17 @@ class VolatileTrader:
         et = et.replace(tzinfo=_IST)
         target["name"]       = name.strip() or target["name"]
         target["event_time"] = et.strftime("%Y-%m-%dT%H:%M")
+        if params is not None:
+            target["params"] = params if params else {}
         events.sort(key=lambda x: x["event_time"])
         await store.set(self.EVENTS_KEY, events)
-        await self._log(f"Event updated: '{target['name']}' @ {target['event_time']}")
-        await self._broadcast()          # instant frontend update
+        # If this is the currently active event, sync params into memory immediately
+        if self._active_event and self._active_event.get("id") == event_id:
+            self._active_event["params"] = target.get("params", {})
+            await self._save_state()
+        await self._log(f"Event updated: '{target['name']}' @ {target['event_time']}"
+                        + (f" params={params}" if params else ""))
+        await self._broadcast()
         return target
 
     # ─────────────────────────────────────────────────────────────
@@ -343,9 +364,9 @@ class VolatileTrader:
     # ─────────────────────────────────────────────────────────────
 
     def _ep(self, key: str, default):
-        """Return event-specific param, falling back to global CFG vol_ key."""
+        """Return event-specific param. Event params are mandatory — no global cfg fallback."""
         ev_params = (self._active_event or {}).get("params", {})
-        return ev_params.get(key, getattr(cfg, f"vol_{key}", default))
+        return ev_params.get(key, default)
 
     async def _log_vol_event(self, event_type: str, message: str = ""):
         """Persist a key event to session_event_log for post-session audit."""
@@ -366,8 +387,11 @@ class VolatileTrader:
             log.debug(f"_log_vol_event failed: {e}")
 
     async def _check_for_active_event(self, now: datetime):
+        # Never activate a new event if already searching/executing/managing
+        if self._state != VState.SLEEP:
+            return
         from backend.utils import is_blackout_day
-        if is_blackout_day(now.date(), False,
+        if is_blackout_day(now.date(), bool(getattr(cfg, "vol_skip_weekends", False)),
                            str(getattr(cfg, "vol_blackout_dates", ""))):
             return
 
@@ -383,22 +407,36 @@ class VolatileTrader:
                 continue
             wc = self._compute_window_close(et)
             if et <= now <= wc:
+                # Block activation if required params are missing
+                ev_params = e.get("params", {})
+                _required = ["combined_premium_max", "tp_multiplier", "strike_gap",
+                             "strike_gap_tolerance", "contract_qty", "min_ask_qty"]
+                missing = [k for k in _required if k not in ev_params]
+                if missing:
+                    await self._log(
+                        f"Event '{e['name']}' skipped — params not set: {', '.join(missing)}. "
+                        f"Edit the event and add all required parameters.",
+                        "WARNING",
+                    )
+                    await self._broadcast()
+                    return
                 self._active_event = {
                     "id":           e["id"],
                     "name":         e["name"],
                     "event_time":   e["event_time"],
                     "window_close": wc.strftime("%Y-%m-%dT%H:%M"),
-                    "params":       e.get("params", {}),  # per-event trading params
+                    "params":       ev_params,
                 }
                 self._state = VState.SEARCHING
                 await self._save_state()
                 await self._log(
                     f"Window open for '{e['name']}' — "
-                    f"searching until {wc.strftime('%d %b %H:%M IST')}"
+                    f"searching until {wc.strftime('%d %b %H:%M IST')} "
+                    f"(max=${ev_params['combined_premium_max']} TP×{ev_params['tp_multiplier']})"
                 )
                 await self._log_vol_event("search_started",
                     f"event='{e['name']}' window_close={wc.strftime('%H:%M IST')} "
-                    f"params={e.get('params', {})}")
+                    f"params={ev_params}")
                 await self._broadcast()
                 return
 
@@ -462,7 +500,7 @@ class VolatileTrader:
             await self._broadcast()
             return
 
-        self._scan_reason = "All conditions met — executing"
+        self._scan_reason = f"All conditions met (combined={combined:.0f} ≤ max={max_prem:.0f}) — executing"
         await self._execute_entry(put, call, combined)
 
     def _find_strict_itm_pair(self, spot: float):
@@ -887,10 +925,6 @@ class VolatileTrader:
             "events": self.get_events(),
             "mark_price": self._mark,
             "combined_entry": self._combined_entry,
-            "combined_premium_max": float(getattr(cfg, "vol_combined_premium_max", 800.0)),
-            "tp_multiplier": float(getattr(cfg, "vol_tp_multiplier", 1.10)),
-            "strike_gap": float(getattr(cfg, "vol_strike_gap", 500.0)),
-            "strike_gap_tol": float(getattr(cfg, "vol_strike_gap_tolerance", 50.0)),
             "window_close_h": int(getattr(cfg, "vol_window_close_h", 6)),
             "window_close_m": int(getattr(cfg, "vol_window_close_m", 0)),
             "unrealized_pnl": round(unrealized, 2),
