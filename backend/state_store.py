@@ -15,7 +15,7 @@ import logging
 import sqlite3
 import time
 from concurrent.futures import ThreadPoolExecutor
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 
 log  = logging.getLogger("state_store")
 _pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="state_io")
@@ -181,21 +181,33 @@ class StateStore:
     # ── Connection ─────────────────────────────────────────────────────────
 
     async def connect(self, dsn: str = ""):
+        """
+        Dual-backend setup:
+          PostgreSQL (if DATABASE_URL set) → KV cache (agent_state) only.
+          SQLite                           → ALL structured data:
+                                             paper_trades, trading_sessions,
+                                             session_event_log, ob_history, etc.
+
+        This split allows the server to use Postgres for state persistence
+        while keeping all trade/journal records in a reliable local SQLite file.
+        Both backends are ALWAYS initialised — PostgreSQL is never a replacement
+        for SQLite, only an addition for the KV layer.
+        """
+        import os as _os
         loop = asyncio.get_running_loop()
+
+        # ── 1. PostgreSQL for KV (agent_state) ─────────────────────────────
         if dsn and dsn.startswith("postgresql"):
             try:
                 import asyncpg
                 self._pg_pool = await asyncpg.create_pool(dsn, min_size=2, max_size=10)
                 await self._pg_ensure_table()
                 await self._pg_load_all()
-                log.info("PostgreSQL connected.")
-                return
+                log.info("PostgreSQL connected — KV store active.")
             except Exception as e:
-                log.warning(f"PostgreSQL unavailable ({e}) — using SQLite.")
+                log.warning(f"PostgreSQL unavailable ({e}) — KV will use SQLite cache.")
 
-        # Use env var DB_PATH if set, otherwise absolute path next to this file
-        # so the DB is found regardless of which directory the server starts from.
-        import os as _os
+        # ── 2. SQLite for ALL structured data (always, regardless of Postgres) ─
         default_db = _os.path.join(
             _os.path.dirname(_os.path.abspath(__file__)), "..", "hedge_state.db"
         )
@@ -203,8 +215,27 @@ class StateStore:
             _os.environ.get("DB_PATH", default_db)
         )
         await loop.run_in_executor(_pool, self._sqlite_init)
-        await loop.run_in_executor(_pool, self._sqlite_load_all)
-        log.info(f"SQLite state store ready: {self._db_path}")
+        # Load KV from SQLite only if PostgreSQL is NOT available
+        if not self._pg_pool:
+            await loop.run_in_executor(_pool, self._sqlite_load_all)
+        log.info(f"SQLite ready (trades/sessions/events): {self._db_path}")
+        # Sanity check — verify paper_trades table is writable at startup
+        try:
+            def _write_test():
+                with sqlite3.connect(self._db_path) as c:
+                    c.execute(
+                        "INSERT INTO paper_trades "
+                        "(trader_name,action,symbol,side,qty,fill_price,pnl,ts_ist,ts_utc) "
+                        "VALUES ('__test__','TEST','TEST','BUY',0,0,0,'',0)"
+                    )
+                    c.execute("DELETE FROM paper_trades WHERE trader_name='__test__'")
+            await loop.run_in_executor(_pool, _write_test)
+            log.info("paper_trades write-test: OK")
+        except Exception as e:
+            log.error(
+                f"paper_trades write-test FAILED: {e} "
+                f"— DB path={self._db_path} — trades will NOT persist!"
+            )
 
     # ── SQLite init ────────────────────────────────────────────────────────
 
@@ -219,10 +250,15 @@ class StateStore:
                 "ALTER TABLE trading_sessions ADD COLUMN is_force_closed INTEGER DEFAULT 0",
                 "ALTER TABLE trading_sessions ADD COLUMN balance_before REAL",
                 "ALTER TABLE trading_sessions ADD COLUMN balance_after  REAL",
+                "ALTER TABLE trading_sessions ADD COLUMN window_open_ts TEXT",
+                "ALTER TABLE trading_sessions ADD COLUMN display_name   TEXT",
+                "ALTER TABLE session_event_log ADD COLUMN session_id TEXT",
             ]:
                 try: c.execute(ddl)
                 except Exception: pass
-        # session_event_log: schema handles creation; no column migrations needed yet
+            try:
+                c.execute("CREATE INDEX IF NOT EXISTS idx_sel_session_id ON session_event_log(session_id)")
+            except Exception: pass
         # ob_history migrations — run in order before index creation
         with sqlite3.connect(self._db_path) as c:
             for ddl in [
@@ -310,7 +346,18 @@ class StateStore:
             try:
                 await loop.run_in_executor(_pool, self._sqlite_insert_paper_trade, row)
             except Exception as e:
-                log.error(f"save_paper_trade error: {e}")
+                log.error(
+                    f"save_paper_trade FAILED — trade NOT in DB! "
+                    f"action={action} symbol={symbol} pnl={pnl} session={session_id} err={e}"
+                )
+                # Retry once with a fresh connection
+                try:
+                    await loop.run_in_executor(_pool, self._sqlite_insert_paper_trade, row)
+                    log.info("save_paper_trade retry succeeded.")
+                except Exception as e2:
+                    log.error(f"save_paper_trade retry also failed: {e2}")
+        else:
+            log.error("save_paper_trade: NO DB PATH — trade lost permanently!")
         return row
 
     def _sqlite_get_paper_trades(self, trader_name: str, limit: int) -> list:
@@ -342,16 +389,20 @@ class StateStore:
                    (session_id, trader_name, session_date, target_line, entry_zone,
                     entry_price, entry_ts_ist, close_reason, close_ts_ist,
                     futures_pnl, hedge_pnl, total_pnl, status,
-                    balance_before, balance_after)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    balance_before, balance_after, window_open_ts, display_name)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                    ON CONFLICT(session_id) DO UPDATE SET
-                     close_reason=excluded.close_reason,
-                     close_ts_ist=excluded.close_ts_ist,
-                     futures_pnl=excluded.futures_pnl,
-                     hedge_pnl=excluded.hedge_pnl,
-                     total_pnl=excluded.total_pnl,
-                     status=excluded.status,
-                     balance_after=COALESCE(excluded.balance_after, trading_sessions.balance_after)""",
+                     close_reason  = COALESCE(excluded.close_reason, trading_sessions.close_reason),
+                     close_ts_ist  = COALESCE(excluded.close_ts_ist, trading_sessions.close_ts_ist),
+                     entry_ts_ist  = COALESCE(excluded.entry_ts_ist, trading_sessions.entry_ts_ist),
+                     entry_price   = COALESCE(excluded.entry_price, trading_sessions.entry_price),
+                     futures_pnl   = excluded.futures_pnl,
+                     hedge_pnl     = excluded.hedge_pnl,
+                     total_pnl     = excluded.total_pnl,
+                     status        = excluded.status,
+                     window_open_ts= COALESCE(excluded.window_open_ts, trading_sessions.window_open_ts),
+                     display_name  = COALESCE(excluded.display_name, trading_sessions.display_name),
+                     balance_after = COALESCE(excluded.balance_after, trading_sessions.balance_after)""",
                 (
                     row["session_id"], row["trader_name"], row["session_date"],
                     row.get("target_line"), row.get("entry_zone", ""),
@@ -360,6 +411,7 @@ class StateStore:
                     row.get("futures_pnl", 0), row.get("hedge_pnl", 0),
                     row.get("total_pnl", 0), row.get("status", "open"),
                     row.get("balance_before"), row.get("balance_after"),
+                    row.get("window_open_ts"), row.get("display_name"),
                 ),
             )
 
@@ -424,7 +476,8 @@ class StateStore:
                        target_line, entry_zone, entry_price,
                        entry_ts_ist, close_reason, close_ts_ist,
                        futures_pnl, hedge_pnl, total_pnl, status,
-                       created_at, is_force_closed
+                       created_at, is_force_closed,
+                       window_open_ts, display_name
                 FROM trading_sessions {where_a}"""
 
             # ── Part B: no-trade activity days (events exist, no session row) ──
@@ -454,9 +507,11 @@ class StateStore:
                     0.0 AS futures_pnl,
                     0.0 AS hedge_pnl,
                     0.0 AS total_pnl,
-                    CASE WHEN e.session_date = ? THEN 'open' ELSE 'no_trade' END AS status,
+                    CASE WHEN e.session_date = ? THEN 'running' ELSE 'done' END AS status,
                     MIN(e.created_at) AS created_at,
-                    0 AS is_force_closed
+                    0 AS is_force_closed,
+                    MIN(e.event_ts_ist) AS window_open_ts,
+                    NULL AS display_name
                 FROM session_event_log e
                 {where_b}NOT EXISTS (
                     SELECT 1 FROM trading_sessions t
@@ -520,7 +575,7 @@ class StateStore:
     def _sqlite_mark_force_closed(self, session_id: str):
         with sqlite3.connect(self._db_path) as c:
             c.execute(
-                "UPDATE trading_sessions SET is_force_closed=1, status='force_closed' WHERE session_id=?",
+                "UPDATE trading_sessions SET is_force_closed=1, status='done' WHERE session_id=?",
                 (session_id,)
             )
 
@@ -641,11 +696,12 @@ class StateStore:
             c.execute(
                 """INSERT INTO session_event_log
                    (trader_name, session_date, event_ts_ist, event_type,
-                    state, price, locked_line, message)
-                   VALUES (?,?,?,?,?,?,?,?)""",
+                    state, price, locked_line, message, session_id)
+                   VALUES (?,?,?,?,?,?,?,?,?)""",
                 (row["trader_name"], row["session_date"], row["event_ts_ist"],
                  row["event_type"], row.get("state"), row.get("price"),
-                 row.get("locked_line"), row.get("message", "")),
+                 row.get("locked_line"), row.get("message", ""),
+                 row.get("session_id")),
             )
 
     def _sqlite_get_session_events(self, trader_name: str,
@@ -666,12 +722,14 @@ class StateStore:
     async def save_session_event(self, trader_name: str, session_date: str,
                                   event_ts_ist: str, event_type: str,
                                   state: str = "", price: float = 0.0,
-                                  locked_line: float = 0.0, message: str = ""):
+                                  locked_line: float = 0.0, message: str = "",
+                                  session_id: str = ""):
         row = {
             "trader_name": trader_name, "session_date": session_date,
             "event_ts_ist": event_ts_ist, "event_type": event_type,
             "state": state, "price": price or None,
             "locked_line": locked_line or None, "message": message,
+            "session_id": session_id or None,
         }
         if self._db_path:
             loop = asyncio.get_running_loop()
@@ -683,15 +741,49 @@ class StateStore:
     def _sqlite_get_session_events_by_id(self, session_id: str) -> list:
         """
         Get session_event_log rows for a session.
-        Handles two session_id formats:
-          - Real trade:  '2026-06-08_00-05-04_IST'  → lookup trader from trading_sessions, ±1 day
-          - No-trade:    'notrade_BullishExecutor_Paper_2026-06-07' → parse trader+date directly
+        Handles session_id formats:
+          - New format:  'exp_140626_1330_bull' → direct session_id column lookup
+          - No-trade:    'notrade_BullishExecutor_Paper_2026-06-07' → parse trader+date
+          - Volatile:    'vol_{evt_id}' → lookup from trading_sessions
+          - Legacy trade:'2026-06-08_00-05-04_IST' → date-based lookup
         """
         from datetime import datetime, timedelta
         with sqlite3.connect(self._db_path) as c:
             c.row_factory = sqlite3.Row
 
-            if session_id.startswith("notrade_"):
+            if session_id.startswith("exp_"):
+                # New canonical format — direct lookup by session_id column
+                rows = c.execute(
+                    "SELECT * FROM session_event_log WHERE session_id=? ORDER BY created_at ASC",
+                    (session_id,)
+                ).fetchall()
+                if rows:
+                    return [dict(r) for r in rows]
+                # Fallback: lookup via trading_sessions for cross-day events
+                row = c.execute(
+                    "SELECT trader_name, session_date FROM trading_sessions WHERE session_id=?",
+                    (session_id,)
+                ).fetchone()
+                if not row:
+                    return []
+                trader_name = row["trader_name"]
+                date_str    = row["session_date"] or ""
+                try:
+                    d = datetime.strptime(date_str, "%Y-%m-%d")
+                    candidates = [date_str, (d - timedelta(days=1)).strftime("%Y-%m-%d")]
+                except Exception:
+                    candidates = [date_str] if date_str else []
+                if not candidates:
+                    return []
+                placeholders = ",".join("?" for _ in candidates)
+                rows = c.execute(
+                    f"SELECT * FROM session_event_log WHERE trader_name=? "
+                    f"AND session_date IN ({placeholders}) ORDER BY created_at ASC",
+                    [trader_name] + candidates,
+                ).fetchall()
+                return [dict(r) for r in rows]
+
+            elif session_id.startswith("notrade_"):
                 # Format: notrade_{trader_name}_{YYYY-MM-DD}
                 date_str    = session_id[-10:]
                 trader_name = session_id[len("notrade_"):-11]
@@ -714,7 +806,7 @@ class StateStore:
                 if not candidates:
                     return []
             else:
-                # Real session: first 10 chars = date portion
+                # Legacy real session: first 10 chars = date portion
                 date_str = session_id[:10]
                 try:
                     d = datetime.strptime(date_str, "%Y-%m-%d")

@@ -390,11 +390,6 @@ class VolatileTrader:
         # Never activate a new event if already searching/executing/managing
         if self._state != VState.SLEEP:
             return
-        from backend.utils import is_blackout_day
-        if is_blackout_day(now.date(), bool(getattr(cfg, "vol_skip_weekends", False)),
-                           str(getattr(cfg, "vol_blackout_dates", ""))):
-            return
-
         events = store.get(self.EVENTS_KEY) or []
         for e in events:
             if e.get("traded"):  # already executed once — never re-activate
@@ -837,21 +832,38 @@ class VolatileTrader:
             return
         leg["sell_placed"] = True
         await self._save_state()
-        leg["closed"] = True
-        leg["close_price"] = 0.0
-        leg["close_reason"] = "EXPIRED"
+        
         sym = leg["symbol"]
         qty = leg["qty"]
-        loss = -leg["entry_price"] * qty
+        
+        # Calculate intrinsic value at expiry based on mark price
+        # Symbol format: BTC-260603-67500-C
+        parts = sym.split("-")
+        strike = float(parts[2]) if len(parts) >= 4 else 0.0
+        is_put = "-P" in sym.upper()
+        
+        if strike > 0 and self._mark > 0:
+            if is_put:
+                intrinsic = max(strike - self._mark, 0.0)
+            else:
+                intrinsic = max(self._mark - strike, 0.0)
+        else:
+            intrinsic = 0.0
+            
+        leg["closed"] = True
+        leg["close_price"] = intrinsic
+        leg["close_reason"] = "EXPIRED"
+        
+        loss = (intrinsic - leg["entry_price"]) * qty
         self._session_pnl += loss
 
-        # Remove from paper engine at price 0 so:
-        #   1. Option removed from _option_positions (unrealized_pnl = 0, not -entry_price)
-        #   2. _realized_pnl updated with the full loss
-        #   3. Accounts section shows correct total_pnl (green, not red)
+        # Remove from paper engine at price `intrinsic` so:
+        #   1. Option removed from _option_positions
+        #   2. _realized_pnl updated with the full loss/profit
+        #   3. Accounts section shows correct total_pnl
         if self.is_paper and self._paper:
             self._paper.executor = self.name
-            fill = await self._paper.sell_option(sym, qty, 0.0, action="EXPIRED")
+            fill = await self._paper.sell_option(sym, qty, intrinsic, action="EXPIRED")
             if fill:
                 await self._paper.save_state()
             else:
@@ -864,12 +876,15 @@ class VolatileTrader:
         # Save to DB so account history shows the expired trade with full timestamp
         from backend.utils import ist_now_str, utc_now as _utc_now
         evt_id = (self._active_event or {}).get("id", "")
+        
+        notes = f"Expired ITM — remaining value ${intrinsic:.2f} (PnL ${loss:+.2f})" if intrinsic > 0 else f"Expired worthless — full premium lost ${abs(loss):.2f}"
+        
         await store.save_paper_trade(
-            self.name, "EXPIRED", sym, "SELL", qty, 0.0, loss,
-            notes=f"Expired worthless — premium lost ${abs(loss):.2f}",
+            self.name, "EXPIRED", sym, "SELL", qty, intrinsic, loss,
+            notes=notes,
             ts_ist=ist_now_str(), ts_utc=_utc_now(), session_id=f"vol_{evt_id}")
 
-        await self._log(f"EXPIRED {sym}  loss: {loss:+.2f}")
+        await self._log(f"EXPIRED {sym}  intrinsic: {intrinsic:.2f}  loss: {loss:+.2f}")
         await self._save_state()
 
     # ─────────────────────────────────────────────────────────────

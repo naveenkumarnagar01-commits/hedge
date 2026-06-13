@@ -172,8 +172,18 @@ class BaseExecutor:
         # AttributeError when _serialize() is called after restart in MANAGING_POSITION
         self.execution_time_ist: str = ""
 
+        # Active session ID — set at window open, persists until daily reset.
+        # Format: exp_DDMMYY_HHMM_prefix  e.g. exp_140626_1330_bull
+        self._active_session_id: str = ""
+
         # Guard: prevents concurrent double-entry into _do_force_close()
         self._is_force_closing: bool = False
+
+        # No-trade session tracking — closest approach and reason
+        self._min_zone_distance:   float = float('inf')  # closest approach pts
+        self._closest_approach_tf: str   = ""
+        self._in_zone_snap_count:  int   = 0
+        self._no_trade_reason:     str   = ""
 
         # Tasks
         self._main_task: Optional[asyncio.Task] = None
@@ -435,6 +445,24 @@ class BaseExecutor:
         if self._eligibility_date and self._eligibility_date != session_day:
             if self.state not in (ExState.MANAGING_POSITION, ExState.PARTIAL_BOOKING):
                 await self._log(f"New session detected ({session_day}). Resetting state to SLEEP.")
+                if self.session_start_ts > 0 or self._active_session_id:
+                    _reason = self._no_trade_reason or ("ob_wait" if self._ob_wait_active else "window_closed")
+                    await self._log_session_event("no_trade_close", {
+                        "reason":           _reason,
+                        "closest_pts":      round(self._min_zone_distance if self._min_zone_distance < float('inf') else 0, 0),
+                        "closest_tf":       self._closest_approach_tf,
+                        "in_zone_snapshots": self._in_zone_snap_count,
+                        "window_close_ts":  ist_now_str(),
+                    })
+                    if self._active_session_id:
+                        await store.save_session(
+                            session_id=self._active_session_id, trader_name=self.name,
+                            close_reason=_reason, close_ts_ist=ist_now_str(), status="done",
+                        )
+                    self._min_zone_distance   = float('inf')
+                    self._closest_approach_tf = ""
+                    self._in_zone_snap_count  = 0
+                    self._no_trade_reason     = ""
                 await self._reset_daily()
 
         # ── FORCE_CLOSE recovery (crash-recovery guard) ────────────────────
@@ -494,6 +522,24 @@ class BaseExecutor:
                     f"Force-close time reached during {self.state.value} — aborting pre-entry, going SLEEP.",
                     level="WARNING"
                 )
+                if self.session_start_ts > 0 or self._active_session_id:
+                    _reason = self._no_trade_reason or ("ob_wait" if self._ob_wait_active else "never_in_zone")
+                    await self._log_session_event("no_trade_close", {
+                        "reason":           _reason,
+                        "closest_pts":      round(self._min_zone_distance if self._min_zone_distance < float('inf') else 0, 0),
+                        "closest_tf":       self._closest_approach_tf,
+                        "in_zone_snapshots": self._in_zone_snap_count,
+                        "window_close_ts":  ist_now_str(),
+                    })
+                    if self._active_session_id:
+                        await store.save_session(
+                            session_id=self._active_session_id, trader_name=self.name,
+                            close_reason=_reason, close_ts_ist=ist_now_str(), status="done",
+                        )
+                    self._min_zone_distance   = float('inf')
+                    self._closest_approach_tf = ""
+                    self._in_zone_snap_count  = 0
+                    self._no_trade_reason     = ""
                 await self._reset_daily()
                 await self._save_state()
                 return
@@ -532,19 +578,6 @@ class BaseExecutor:
                     await self._publish_monitor(p, in_window)
                     return
 
-                # Blackout check
-                today_date = ist_now().date()
-                from backend.utils import is_blackout_day
-                _blk_val = self._cfg("blackout_dates")
-                blk_dates = "" if _blk_val is None else str(_blk_val)
-                _skip_wknd_val = self._cfg("skip_weekends")
-                _skip_wknd = bool(_skip_wknd_val) if _skip_wknd_val is not None else True
-                if is_blackout_day(today_date, _skip_wknd, blk_dates):
-                    await self._log(f"Calendar blackout: {today_date.strftime('%A %Y-%m-%d')} — staying SLEEP")
-                    self.eligible_today = False
-                    self._eligibility_date = today_date.isoformat()
-                    await self._publish_monitor(p, False)
-                    return
 
                 # Mark session start once
                 if self.session_start_ts == 0.0:
@@ -695,14 +728,31 @@ class BaseExecutor:
                 f"Fetching Order Block zones at window open | "
                 f"direction={self.direction} → nearest {zone_type} zone"
             )
+            # ── Create session record at window open ─────────────────────────
+            if not self._active_session_id:
+                self._active_session_id = self._compute_session_id()
+                await store.save_session(
+                    session_id=self._active_session_id,
+                    trader_name=self.name,
+                    session_date=session_day,
+                    status="running",
+                    window_open_ts=ist_now_str(),
+                    display_name=self._session_display_name(),
+                )
+                self.log.info(f"Session created: {self._active_session_id} ({self._session_display_name()})")
             await self._log_session_event("window_open",
                 f"direction={self.direction} scanning 4TF OBs price={price:.0f}")
             await self._publish_monitor(price, in_window)
             try:
-                target_line = await self._run_ob_analysis()
+                try:
+                    target_line = await asyncio.wait_for(self._run_ob_analysis(), timeout=120)
+                except asyncio.TimeoutError:
+                    self.log.error(f"[{self.name}] OB analysis timed out (120s) — retrying next tick")
+                    self.analysis_report = {"error": "ob analysis timeout", "ob_zone": None}
+                    target_line = None
                 if not target_line:
                     error_msg  = self.analysis_report.get("error", "no zone found")
-                    no_candles = "candle" in error_msg.lower()
+                    no_candles = "candle" in error_msg.lower() or "timeout" in error_msg.lower()
                     if no_candles:
                         # Data not ready — retry in 5 min via main loop cooldown
                         await self._log(
@@ -812,7 +862,13 @@ class BaseExecutor:
             try:
                 candles = get_candles(n, tf)
                 if len(candles) < 10:
-                    candles = await fetch_historical_candles(n, tf)
+                    try:
+                        candles = await asyncio.wait_for(
+                            fetch_historical_candles(n, tf), timeout=45
+                        )
+                    except asyncio.TimeoutError:
+                        self.log.warning(f"[{self.name}] {tf} candle fetch timed out (45s) — using cached")
+                        candles = get_candles(n, tf)  # use whatever is cached
                 if not candles:
                     self._session_obs[tf] = {zone_type: None}
                     continue
@@ -912,12 +968,16 @@ class BaseExecutor:
             )
             self._update_last_trigger_result("aborted-timeout")
             fc = self._verify_fail_counts
-            total_iters = sum(fc.values())
-            await self._log_session_event("verify_timeout",
-                f"elapsed={elapsed:.0f}s iterations={total_iters} "
-                f"last_fail=[{self._verify_last_fail}] "
-                f"prox={fc['prox']} prem={fc['prem']} "
-                f"tv={fc['tv']} spread={fc['spread']} no_itm={fc['no_itm']}")
+            await self._log_session_event("verify_timeout", {
+                "elapsed_sec":      int(elapsed),
+                "iterations":       sum(fc.values()),
+                "last_fail":        self._verify_last_fail,
+                "fail_counts":      dict(fc),
+                "closest_pts":      round(self._min_zone_distance if self._min_zone_distance < float('inf') else 0, 0),
+                "closest_tf":       self._closest_approach_tf,
+                "in_zone_snapshots": self._in_zone_snap_count,
+            })
+            self._no_trade_reason = "verify_timeout"
             # Light reset: keep OB data loaded; only reset verify state.
             # Trader returns to SLEEP and re-triggers when price re-enters any zone.
             self.triggered           = False
@@ -1086,17 +1146,18 @@ class BaseExecutor:
                 await store.log_trade(self.name, "PARTIAL_REBUY", "BTCUSDT",
                                       self._futures_side, rbx_qty, rbx_px, 0.0, "FILLED", {}, self.is_paper)
                 from backend.utils import ist_now_str as _isn, utc_now as _utn
-                _sid_rb = (self.execution_time_ist.replace(" ", "_").replace(":", "-")
-                           if self.execution_time_ist else "")
                 await store.save_paper_trade(
                     self.name, "PARTIAL_REBUY", "BTCUSDT", self._futures_side,
                     rbx_qty, rbx_px, 0.0,
-                    session_id=_sid_rb,
+                    session_id=self._active_session_id,
                     notes=f"rebuy limit filled | new_avg={new_avg:.2f}",
                     ts_ist=_isn(), ts_utc=_utn())
-                await self._log_session_event("rebuy_filled",
-                    f"qty={rbx_qty} @{rbx_px:.2f} new_avg={new_avg:.2f} "
-                    f"new_qty={new_qty} new_full_close≈{self.full_close_price:.2f}")
+                await self._log_session_event("rebuy_filled", {
+                    "fill_price":   round(rbx_px, 2),
+                    "fill_qty":     round(rbx_qty, 4),
+                    "new_avg":      round(new_avg, 2),
+                    "realized_pnl": round(self.session_realized_futures_pnl, 2),
+                })
                 self._recalc_price_levels()  # TP levels update with new avg
                 await self._log(
                     f"REBUY LIMIT FILLED @ {rbx_px:.2f}  new_avg={new_avg:.2f}  "
@@ -1298,25 +1359,23 @@ class BaseExecutor:
         })
 
         # Persist ALL trades to structured SQLite paper_trades table
-        # Pass the exact execution timestamp so DB records match actual order time.
         from backend.utils import utc_now
         exec_ts_utc = utc_now()
-        sid = self.execution_time_ist.replace(" ", "_").replace(":", "-")
         await store.save_paper_trade(
             self.name, "HEDGE_BUY", sym, "BUY", qty, fill_px, 0.0,
-            session_id=sid, notes=f"hedge premium=${fill_px*qty:.2f}",
+            session_id=self._active_session_id, notes=f"hedge premium=${fill_px*qty:.2f}",
             ts_ist=self.execution_time_ist, ts_utc=exec_ts_utc)
         await store.save_paper_trade(
             self.name, f"FUTURES_{side}", "BTCUSDT", side, qty, fut_px, 0.0,
-            session_id=sid, notes=f"target_line=${self.locked_high_line or 0:.0f}",
+            session_id=self._active_session_id, notes=f"target_line=${self.locked_high_line or 0:.0f}",
             ts_ist=self.execution_time_ist, ts_utc=exec_ts_utc)
         # Session record — capture balance_before (before any fills deducted premium)
         _bal_before = round(self._paper.balance + self.hedge_premium_paid, 2) if self._paper else None
         await store.save_session(
-            session_id=sid, trader_name=self.name,
+            session_id=self._active_session_id, trader_name=self.name,
             target_line=self.locked_high_line, entry_zone=self.entry_zone,
             entry_price=fut_px, entry_ts_ist=self.execution_time_ist,
-            status="open",
+            status="running",
             balance_before=_bal_before,
         )
 
@@ -1360,13 +1419,16 @@ class BaseExecutor:
                               qty_sell, sell_px, sell_pnl, "FILLED", {}, self.is_paper)
         from backend.utils import utc_now as _utc_now, ist_now_str as _ist_now_str
         _ts_ist = _ist_now_str(); _ts_utc = _utc_now()
-        _sid = self.execution_time_ist.replace(" ", "_").replace(":", "-") if self.execution_time_ist else ""
         await store.save_paper_trade(
             self.name, "PARTIAL_SELL", "BTCUSDT", side_sell, qty_sell, sell_px, sell_pnl,
-            session_id=_sid, notes=f"realized=${sell_pnl:+.2f}", ts_ist=_ts_ist, ts_utc=_ts_utc)
-        await self._log_session_event("partial_booking",
-            f"sold {qty_sell} BTC @{sell_px:.2f} realized={sell_pnl:+.2f} "
-            f"entry_avg={self.futures_entry_price:.2f} remaining_qty={self.futures_remaining_qty:.4f}")
+            session_id=self._active_session_id, notes=f"realized=${sell_pnl:+.2f}", ts_ist=_ts_ist, ts_utc=_ts_utc)
+        await self._log_session_event("partial_booking", {
+            "sold_qty":      qty_sell,
+            "sell_price":    round(sell_px, 2),
+            "realized_pnl":  round(sell_pnl, 2),
+            "entry_avg":     round(self.futures_entry_price, 2),
+            "remaining_qty": round(self.futures_remaining_qty, 4),
+        })
 
         # Rebuy at avg_remaining - 2*TV (results in new_avg = avg - TV)
         tv            = self.hedge_tv_at_entry
@@ -1389,8 +1451,12 @@ class BaseExecutor:
             f"PARTIAL SELL DONE: sold {qty_sell} BTC @ {sell_px:.2f}  pnl={sell_pnl:+.2f}  | "
             f"REBUY LIMIT SET @ {rebuy_price:.2f}  (avg − 2×TV={tv:.2f}) — waits for price to cross"
         )
-        await self._log_session_event("rebuy_set",
-            f"limit@{rebuy_price:.2f} qty={qty_sell} (avg={avg_remaining:.2f} - 2×TV={tv:.2f})")
+        await self._log_session_event("rebuy_set", {
+            "rebuy_price": round(rebuy_price, 2),
+            "rebuy_qty":   qty_sell,
+            "entry_avg":   round(avg_remaining, 2),
+            "tv":          round(tv, 2),
+        })
         self._recalc_price_levels()
 
         self.partial_done = True
@@ -1455,14 +1521,13 @@ class BaseExecutor:
             f"trough={self._trough_unrealized_pnl:+.2f} "
             f"balance={_bal_tp} "
             f"hedge={self.hedge_symbol} still open for squareoff")
-        if self.execution_time_ist:
-            sid = self.execution_time_ist.replace(" ", "_").replace(":", "-")
+        if self._active_session_id:
             await store.save_session(
-                session_id=sid, trader_name=self.name,
+                session_id=self._active_session_id, trader_name=self.name,
                 futures_pnl=self.session_realized_futures_pnl,
                 hedge_pnl=self.session_realized_hedge_pnl,
                 total_pnl=self.session_realized_futures_pnl + self.session_realized_hedge_pnl,
-                status="open",
+                status="running",
                 balance_after=round(self._paper.balance, 2) if self._paper else None,
             )
         await self._save_state()
@@ -1530,8 +1595,6 @@ class BaseExecutor:
                     fp  = float(opt_fill.get("avg_price", limit_px) or limit_px)
                     pnl = (fp - self.hedge_fill_price) * self.hedge_qty
                     self.session_realized_hedge_pnl += pnl
-                    _sid = (self.execution_time_ist.replace(" ", "_").replace(":", "-")
-                            if self.execution_time_ist else "")
                     await self._log(f"SQUAREOFF option: SELL {self.hedge_qty} {self.hedge_symbol}"
                                      f" @ {fp:.2f}  pnl={pnl:+.2f}")
                     await store.log_trade(self.name, "FORCE_CLOSE_HEDGE", self.hedge_symbol, "SELL",
@@ -1540,7 +1603,7 @@ class BaseExecutor:
                     await store.save_paper_trade(
                         self.name, "FORCE_CLOSE_HEDGE", self.hedge_symbol, "SELL",
                         self.hedge_qty, fp, pnl,
-                        session_id=_sid,
+                        session_id=self._active_session_id,
                         notes=f"squareoff | entry={self.hedge_fill_price:.2f}",
                         ts_ist=_isn(), ts_utc=_utn())
 
@@ -1560,15 +1623,13 @@ class BaseExecutor:
                     pnl = self._futures_unrealized_pnl(fp, qty)
                     self.futures_remaining_qty = 0.0
                     self.session_realized_futures_pnl += pnl
-                    _sid = (self.execution_time_ist.replace(" ", "_").replace(":", "-")
-                            if self.execution_time_ist else "")
                     await self._log(f"SQUAREOFF futures: {side} {qty} BTC @ {fp:.2f}  pnl={pnl:+.2f}")
                     await store.log_trade(self.name, "FORCE_CLOSE_FUTURES", "BTCUSDT", side,
                                           qty, fp, pnl, "FILLED", {}, self.is_paper)
                     from backend.utils import ist_now_str as _isn, utc_now as _utn
                     await store.save_paper_trade(
                         self.name, "FORCE_CLOSE_FUTURES", "BTCUSDT", side, qty, fp, pnl,
-                        session_id=_sid,
+                        session_id=self._active_session_id,
                         notes=f"squareoff | entry={self.futures_entry_price:.2f}",
                         ts_ist=_isn(), ts_utc=_utn())
 
@@ -1584,16 +1645,15 @@ class BaseExecutor:
             _trough_snap = self._trough_unrealized_pnl
             _bal_after   = round(self._paper.balance, 2) if self._paper else None
 
-            if self.execution_time_ist:
-                sid = self.execution_time_ist.replace(" ", "_").replace(":", "-")
+            if self._active_session_id:
                 await store.save_session(
-                    session_id=sid, trader_name=self.name,
+                    session_id=self._active_session_id, trader_name=self.name,
                     futures_pnl=self.session_realized_futures_pnl,
                     hedge_pnl=self.session_realized_hedge_pnl,
                     total_pnl=self.session_realized_futures_pnl + self.session_realized_hedge_pnl,
                     close_reason="squareoff",
                     close_ts_ist=ist_now_str(),
-                    status="closed",
+                    status="done",
                     balance_after=_bal_after,
                 )
             self._reset_position()
@@ -1617,17 +1677,18 @@ class BaseExecutor:
             self.session_start_ts  = 0.0
             await self._log("Squareoff complete. Ineligible for rest of today.")
             _total_sq = self.session_realized_futures_pnl + self.session_realized_hedge_pnl
-            await self._log_session_event("squareoff",
-                f"fut_pnl={self.session_realized_futures_pnl:+.2f} "
-                f"hedge_pnl={self.session_realized_hedge_pnl:+.2f} "
-                f"total={_total_sq:+.2f} "
-                f"peak={_peak_snap:+.2f} "
-                f"trough={_trough_snap:+.2f} "
-                f"balance_after={_bal_after}")
+            await self._log_session_event("squareoff", {
+                "fut_pnl":      round(self.session_realized_futures_pnl, 2),
+                "hedge_pnl":    round(self.session_realized_hedge_pnl, 2),
+                "total_pnl":    round(_total_sq, 2),
+                "peak_pnl":     round(_peak_snap, 2),
+                "trough_pnl":   round(_trough_snap, 2),
+                "balance_after": round(_bal_after, 2) if isinstance(_bal_after, (int, float)) else _bal_after,
+                "close_ts":     ist_now_str(),
+            })
             # Mark the session as force-closed so it doesn't appear in journal
-            if self.execution_time_ist:
-                sid = self.execution_time_ist.replace(" ", "_").replace(":", "-")
-                await store.mark_session_force_closed(sid)
+            if self._active_session_id:
+                await store.mark_session_force_closed(self._active_session_id)
             # CRITICAL: await paper engine save explicitly so all closed positions are
             # persisted to SQLite BEFORE executor state is saved.
             # Without this, paper engine save is a background create_task that may not
@@ -1823,6 +1884,7 @@ class BaseExecutor:
             "pending_rebuy_qty":               self.pending_rebuy_qty,
             # Position timing & zone
             "execution_time_ist":       self.execution_time_ist,
+            "active_session_id":        self._active_session_id,
             "entry_zone":               self.entry_zone,
             "zone_price_snap":          self.zone_price_snap,
             # Full analysis report for "Check Details" panel
@@ -1873,6 +1935,34 @@ class BaseExecutor:
         except Exception:
             return 0.0
 
+    def _compute_session_id(self) -> str:
+        """
+        Canonical session ID based on the NEXT expiry after now.
+        Format: exp_DDMMYY_HHMM_prefix  e.g. exp_140626_1330_bull
+        Created once at window open; stable for the entire session.
+        """
+        from datetime import timedelta as _td
+        n     = ist_now()
+        exp_h = int(getattr(cfg, "session_expiry_h", 13))
+        exp_m = int(getattr(cfg, "session_expiry_m", 30))
+        expiry = n.replace(hour=exp_h, minute=exp_m, second=0, microsecond=0)
+        if n >= expiry:
+            expiry += _td(days=1)
+        prefix = self._cfg_prefix.rstrip("_")   # "bull" / "bear" / "vol"
+        return f"exp_{expiry.strftime('%d%m%y')}_{exp_h:02d}{exp_m:02d}_{prefix}"
+
+    def _session_display_name(self) -> str:
+        """Human-readable name shown in journal: 'EXP 14/06/26 13:30 BULL'"""
+        from datetime import timedelta as _td
+        n     = ist_now()
+        exp_h = int(getattr(cfg, "session_expiry_h", 13))
+        exp_m = int(getattr(cfg, "session_expiry_m", 30))
+        expiry = n.replace(hour=exp_h, minute=exp_m, second=0, microsecond=0)
+        if n >= expiry:
+            expiry += _td(days=1)
+        prefix = self._cfg_prefix.rstrip("_").upper()
+        return f"EXP {expiry.strftime('%d/%m/%y')} {exp_h:02d}:{exp_m:02d} {prefix}"
+
     def _in_window(self) -> bool:
         if self.force_window:
             return True
@@ -1922,6 +2012,7 @@ class BaseExecutor:
                 price=round(self.current_price, 1),
                 locked_line=round(self.locked_high_line or 0, 1),
                 message=message,
+                session_id=self._active_session_id,
             )
         except Exception as e:
             self.log.debug(f"_log_session_event failed: {e}")
@@ -2050,6 +2141,16 @@ class BaseExecutor:
                 else:
                     in_tfs = [t for t, v in tf_snap.items() if v.get("in_zone")]
                     phase  = f"WATCHING — price in zone: {in_tfs or 'none'}"
+
+                # Track closest approach to any zone (for no-trade journal)
+                for tf, snap in tf_snap.items():
+                    if not snap.get("no_zone") and not snap.get("in_zone"):
+                        d = snap.get("edge_pts", float('inf'))
+                        if d < self._min_zone_distance:
+                            self._min_zone_distance = d
+                            self._closest_approach_tf = tf
+                    if snap.get("in_zone") and snap.get("all_ok") is False:
+                        self._in_zone_snap_count += 1
 
                 await self._log_session_event("condition_snapshot", {
                     "phase":     phase,
@@ -2358,12 +2459,18 @@ class BaseExecutor:
         _sday = get_session_day(_n, _eh, _em)
         if self.analysis_report.get("analysis_time", "")[:10] != _sday:
             self.analysis_report = {}
-        self._eligibility_date   = ""
-        self.eligible_today      = None
-        self.entry_zone          = ""
-        self.zone_price_snap     = 0.0
-        self.session_start_ts    = 0.0
-        self.state               = ExState.SLEEP
+        self._eligibility_date    = ""
+        self.eligible_today       = None
+        self.entry_zone           = ""
+        self.zone_price_snap      = 0.0
+        self.session_start_ts     = 0.0
+        self._active_session_id   = ""   # cleared — new session gets new ID at next window open
+        # Reset no-trade tracking
+        self._min_zone_distance   = float('inf')
+        self._closest_approach_tf = ""
+        self._in_zone_snap_count  = 0
+        self._no_trade_reason     = ""
+        self.state                = ExState.SLEEP
 
     def _reset_position(self):
         self.hedge_symbol              = ""
@@ -2412,6 +2519,7 @@ class BaseExecutor:
             "trigger_time":             self.trigger_time,
             "trigger_line":             self.trigger_line,
             "execution_time_ist":       self.execution_time_ist,
+            "active_session_id":        self._active_session_id,
             "entry_zone":               self.entry_zone,
             "zone_price_snap":          self.zone_price_snap,
             "hedge_symbol":             self.hedge_symbol,
@@ -2474,6 +2582,7 @@ class BaseExecutor:
             self.trigger_time              = s.get("trigger_time", "")
             self.trigger_line              = s.get("trigger_line", 0.0)
             self.execution_time_ist        = s.get("execution_time_ist", "")
+            self._active_session_id        = s.get("active_session_id", "")
             self.entry_zone                = s.get("entry_zone", "")
             self.zone_price_snap           = s.get("zone_price_snap", 0.0)
             self.hedge_symbol              = s.get("hedge_symbol", "")

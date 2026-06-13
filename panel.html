@@ -3169,7 +3169,7 @@
           : `<span style="color:#fbbf24;font-size:10px;padding:1px 6px;border-radius:var(--r-sm);background:#1a1400">OPEN</span>`;
         const progressHtml = leg.closed
           ? `<div style="font-size:9px;color:${isExpired?'#ef444488':'#4b5563'};text-align:center;padding:2px 0">
-               ${isExpired ? `✗ Expired worthless — full premium lost ($${fmt(entry * (leg.qty||1))})` : `✓ Closed at $${fmt(leg.close_price)} · ${leg.close_reason||''}`}
+               ${isExpired ? (leg.close_price > 0 ? `✗ Expired ITM — Value $${fmt(leg.close_price)} (PnL: $${fmt(leg.close_price - entry * (leg.qty||1))})` : `✗ Expired worthless — full premium lost ($${fmt(entry * (leg.qty||1))})`) : `✓ Closed at $${fmt(leg.close_price)} · ${leg.close_reason||''}`}
              </div>`
           : `<div style="background:#111;border-radius:var(--r-sm);height:4px;overflow:hidden;margin-bottom:4px">
                <div style="background:${progCol};height:100%;width:${progPct.toFixed(1)}%;transition:width .5s"></div>
@@ -4094,24 +4094,27 @@ async function _updateSessionBanner() {
 
         let html = '';
         for (const sess of sessions) {
-          const pnl = sess.total_pnl || 0;
+          const pnl    = sess.total_pnl || 0;
           const pnlCol = pnl >= 0 ? '#4ade80' : '#f87171';
-          const pnlSign = pnl >= 0 ? '+' : '';
-          const entryTs = sess.entry_ts_ist || sess.created_at || '—';
-          const closeTs = sess.close_ts_ist || '—';
-          const reason = sess.close_reason || 'OPEN';
+          const pnlSign= pnl >= 0 ? '+' : '';
+          const openTs = sess.window_open_ts || sess.entry_ts_ist || sess.created_at || '—';
+          const closeTs= sess.close_ts_ist || '—';
+          // Session name: new canonical "EXP DD/MM/YY HH:MM BULL" or fallback to date
+          const sesName= sess.display_name || sess.session_date || sess.session_id;
+          const statusLabel = sess.status === 'running' ? '● RUNNING' : sess.status === 'done' ? 'DONE' : (sess.status||'—').toUpperCase();
+          const statusCol   = sess.status === 'running' ? '#4ade80' : '#6b7280';
           html += `
             <div style="border:1px solid var(--b1);border-radius:var(--r-sm);margin-bottom:4px;overflow:hidden">
-              <div style="display:flex;justify-content:space-between;align-items:center;padding:5px 8px;background:var(--bg-3);cursor:pointer"
+              <div style="display:flex;justify-content:space-between;align-items:center;padding:5px 10px;background:var(--bg-3);cursor:pointer"
                    onclick="_expandJournalSession('${key}','${sess.session_id}',this)">
-                <div style="display:flex;gap:12px;align-items:center">
-                  <span style="color:var(--t2);font-size:10px;font-family:monospace">${sess.session_date||''}</span>
-                  <span style="font-size:9px;color:#6b7280">Entry: ${entryTs}</span>
-                  <span style="font-size:9px;color:#6b7280">Close: ${closeTs}</span>
-                  <span style="font-size:9px;background:#1e293b;padding:1px 5px;border-radius:2px;color:var(--t2)">${reason}</span>
+                <div style="display:flex;gap:10px;align-items:center">
+                  <span style="color:#93c5fd;font-size:10px;font-weight:600;letter-spacing:.03em">${sesName}</span>
+                  <span style="font-size:9px;color:#4b5563">Open: ${(openTs||'').substring(11,16)||'—'}</span>
+                  <span style="font-size:9px;color:#4b5563">Close: ${(closeTs||'').substring(11,16)||'—'}</span>
+                  <span style="font-size:9px;color:${statusCol};background:#111;padding:1px 5px;border-radius:2px">${statusLabel}</span>
                 </div>
                 <div style="display:flex;gap:8px;align-items:center">
-                  <span style="font-family:monospace;font-weight:bold;color:${pnlCol}">${pnlSign}$${pnl.toFixed(2)}</span>
+                  <span style="font-family:monospace;font-weight:bold;font-size:11px;color:${pnlCol}">${pnlSign}$${pnl.toFixed(2)}</span>
                   <span style="color:var(--t3);font-size:10px">&#9662;</span>
                 </div>
               </div>
@@ -4128,30 +4131,277 @@ async function _updateSessionBanner() {
       const detailEl = document.getElementById(`sess-detail-${sessionId}`);
       if (!detailEl) return;
       if (detailEl.style.display !== 'none') { detailEl.style.display = 'none'; return; }
-      detailEl.innerHTML = '<div style="color:#6b7280;font-size:10px">Loading trades...</div>';
+      detailEl.innerHTML = '<div style="color:#6b7280;font-size:10px;padding:8px;text-align:center">Loading session story...</div>';
       detailEl.style.display = 'block';
       try {
-        const d = await fetch(`/api/journal/sessions/${sessionId}/trades`).then(r=>r.json());
-        const trades = d.trades || [];
-        if (!trades.length) { detailEl.innerHTML = '<div style="color:#6b7280;font-size:10px">No trades in this session.</div>'; return; }
-        let html = `<table style="width:100%;border-collapse:collapse;font-size:10px">
-          <tr style="color:var(--t3)"><th style="text-align:left;padding:2px 6px">Time</th><th>Action</th><th>Symbol</th><th>Side</th><th>Qty</th><th>Price</th><th style="text-align:right">PnL</th></tr>`;
-        for (const t of trades) {
-          const pnlCol = (t.pnl||0) >= 0 ? '#4ade80' : '#f87171';
-          html += `<tr style="border-top:1px solid var(--b1)">
-            <td style="padding:2px 6px;color:#6b7280;font-family:monospace">${(t.ts_ist||'').substring(11,19)}</td>
-            <td style="color:#f59e0b">${t.action||''}</td>
-            <td style="color:#93c5fd">${t.symbol||''}</td>
-            <td style="${t.side==='BUY'?'color:#4ade80':'color:#f87171'}">${t.side||''}</td>
-            <td>${t.qty||0}</td>
-            <td style="font-family:monospace">$${(t.fill_price||0).toFixed(2)}</td>
-            <td style="text-align:right;font-family:monospace;color:${pnlCol}">${(t.pnl||0)>=0?'+':''}$${(t.pnl||0).toFixed(2)}</td>
-          </tr>`;
+        const [tradesRes, eventsRes] = await Promise.all([
+          fetch(`/api/journal/sessions/${sessionId}/trades`).then(r=>r.json()),
+          fetch(`/api/journal/sessions/${sessionId}/events`).then(r=>r.json())
+        ]);
+        const trades = tradesRes.trades || [];
+        const evts   = eventsRes.events || [];
+
+        if (!evts.length && !trades.length) {
+          detailEl.innerHTML = '<div style="color:#6b7280;font-size:10px;padding:8px">No data for this session.</div>';
+          return;
         }
-        html += '</table>';
+
+        const pj = (e) => { try { return JSON.parse(e.message); } catch(_e) { return null; } };
+        const ts  = (e) => (e.event_ts_ist||'').substring(11,16);
+        const fmt = (v) => v == null ? '—' : Number(v).toLocaleString('en-IN', {minimumFractionDigits:2, maximumFractionDigits:2});
+        const fmtp= (v) => v == null ? '—' : (v >= 0 ? '+' : '') + fmt(v);
+        const fp  = (v) => v == null ? '—' : '$' + Number(v).toLocaleString('en-IN', {minimumFractionDigits:0, maximumFractionDigits:0});
+
+        // Determine if session is still running (no squareoff/no_trade_close yet)
+        const isDone = evts.some(e => ['squareoff','no_trade_close','force_close'].includes(e.event_type));
+        const isRunning = !isDone;
+
+        const byType = {};
+        evts.forEach(e => {
+          if (!byType[e.event_type]) byType[e.event_type] = [];
+          byType[e.event_type].push(e);
+        });
+
+        let html = '<div style="font-size:10px;line-height:1.5;padding:4px 0">';
+
+        // STATUS BAR
+        if (isRunning) {
+          html += '<div style="display:flex;align-items:center;gap:6px;padding:4px 8px;background:#0a1a08;border:1px solid #166534;border-radius:4px;margin-bottom:8px">'
+                + '<span style="width:7px;height:7px;border-radius:50%;background:#4ade80;animation:pulse 1.5s infinite"></span>'
+                + '<span style="color:#4ade80;font-weight:bold;font-size:9px;letter-spacing:.05em">SESSION RUNNING</span>'
+                + '<span style="color:#6b7280;font-size:9px;margin-left:auto">Journal updates live while window is active</span>'
+                + '</div>';
+        } else {
+          html += '<div style="display:flex;align-items:center;gap:6px;padding:4px 8px;background:#0d0d0d;border:1px solid #1f2937;border-radius:4px;margin-bottom:8px">'
+                + '<span style="width:7px;height:7px;border-radius:50%;background:#4b5563"></span>'
+                + '<span style="color:#6b7280;font-weight:bold;font-size:9px;letter-spacing:.05em">SESSION DONE</span>'
+                + '</div>';
+        }
+
+        // WINDOW OPEN
+        const winEv = (byType['window_open_snapshot']||[])[0];
+        if (winEv) {
+          const m = pj(winEv) || {};
+          html += '<div style="margin-bottom:10px">';
+          html += '<div style="color:#60a5fa;font-weight:bold;margin-bottom:4px">&#128269; WINDOW OPENED  ' + ts(winEv) + ' IST  |  BTC ' + fp(m.price_at_open) + '</div>';
+          html += '<div style="color:#9ca3af;font-size:9px;margin-bottom:6px">';
+          html += (m.direction||'') + ' &middot; Window ' + (m.window_open||'') + '–' + (m.window_close||'') + ' &middot; Squareoff ' + (m.squareoff||'');
+          if (m.session_target) html += ' &middot; Session Target $' + m.session_target;
+          if (m.spread_max) html += ' &middot; Max Spread ' + m.spread_max + '%';
+          html += '</div>';
+
+          if (m.zones && Object.keys(m.zones).length > 0) {
+            html += '<table style="width:100%;border-collapse:collapse;font-size:9px;margin-bottom:4px">';
+            html += '<tr style="color:#4b5563;border-bottom:1px solid #1e293b"><th style="text-align:left;padding:2px 5px">TF</th><th style="text-align:left;padding:2px 5px">Zone</th><th style="padding:2px 5px">Mid</th><th style="padding:2px 5px">Grade</th><th style="padding:2px 5px">Buffer</th><th style="padding:2px 5px">Max Ask</th><th style="padding:2px 5px">Max TV</th></tr>';
+            ['5m','15m','1h','4h'].forEach(function(tf) {
+              const z = m.zones[tf];
+              if (!z) {
+                html += '<tr><td style="color:#f59e0b;padding:2px 5px">' + tf.toUpperCase() + '</td><td colspan="6" style="color:#4b5563;padding:2px 5px">No zone</td></tr>';
+              } else {
+                const gradeCol = z.grade==='A+' ? '#a78bfa' : z.grade==='A' ? '#60a5fa' : '#9ca3af';
+                html += '<tr style="border-bottom:1px solid #0f172a">';
+                html += '<td style="color:#f59e0b;padding:2px 5px">' + tf.toUpperCase() + '</td>';
+                html += '<td style="color:#d1d5db;padding:2px 5px">' + fp(z.bottom) + '–' + fp(z.top) + '</td>';
+                html += '<td style="text-align:center;color:#fff;padding:2px 5px">' + fp(z.mid) + '</td>';
+                html += '<td style="text-align:center;color:' + gradeCol + ';padding:2px 5px">' + (z.grade||'—') + '</td>';
+                html += '<td style="text-align:center;color:#6b7280;padding:2px 5px">\xb1' + (z.buffer||0) + 'pts</td>';
+                html += '<td style="text-align:center;color:#9ca3af;padding:2px 5px">$' + (z.max_ask||'—') + '</td>';
+                html += '<td style="text-align:center;color:#9ca3af;padding:2px 5px">$' + (z.max_tv||'—') + '</td>';
+                html += '</tr>';
+              }
+            });
+            html += '</table>';
+          }
+          html += '</div>';
+        }
+
+        // CONDITION SNAPSHOTS
+        const snapEvts = byType['condition_snapshot'] || [];
+        if (snapEvts.length > 0) {
+          html += '<div style="margin-bottom:10px">';
+          html += '<div style="color:#9ca3af;font-size:9px;font-weight:bold;letter-spacing:.05em;margin-bottom:4px">&#128202; CONDITION SNAPSHOTS</div>';
+          html += '<table style="width:100%;border-collapse:collapse;font-size:9px">';
+          html += '<tr style="color:#4b5563;border-bottom:1px solid #1e293b"><th style="text-align:left;padding:2px 5px">Time</th><th style="text-align:right;padding:2px 5px">Price</th><th style="padding:2px 5px">5M</th><th style="padding:2px 5px">15M</th><th style="padding:2px 5px">1H</th><th style="padding:2px 5px">4H</th></tr>';
+
+          snapEvts.forEach(function(ev) {
+            const m = pj(ev) || {};
+            const tfs = m.tf_snap || {};
+
+            function tfCell(tf) {
+              const z = tfs[tf];
+              if (!z) return '<td style="color:#374151;padding:2px 5px;text-align:center">—</td>';
+              if (z.no_zone) return '<td style="color:#374151;padding:2px 5px;text-align:center">no zone</td>';
+              if (z.in_zone) {
+                const allOk = z.all_ok;
+                const checks = [
+                  z.prem_ok===true ? '✓' : z.prem_ok===false ? '✗Ask$' + z.ask : '',
+                  z.tv_ok===true ? '✓' : z.tv_ok===false ? '✗TV$' + z.tv : '',
+                  z.sprd_ok===true ? '✓' : z.sprd_ok===false ? '✗Sp' + z.sprd + '%' : '',
+                ].filter(Boolean).join(' ');
+                return '<td style="padding:2px 5px;text-align:center"><span style="color:' + (allOk?'#4ade80':'#fbbf24') + '">● \xb1' + (z.edge_pts||0) + 'pts</span>' + (checks ? '<div style="color:' + (allOk?'#4ade80':'#f87171') + ';font-size:8px">' + checks + '</div>' : '') + '</td>';
+              }
+              const distCol = z.edge_pts < 100 ? '#fbbf24' : '#6b7280';
+              return '<td style="color:' + distCol + ';padding:2px 5px;text-align:center">▼' + (z.edge_pts||0) + 'pts</td>';
+            }
+
+            html += '<tr style="border-bottom:1px solid #0d1117">';
+            html += '<td style="color:#6b7280;padding:2px 5px;font-family:monospace">' + ts(ev) + '</td>';
+            html += '<td style="color:#d1d5db;padding:2px 5px;text-align:right">' + fp(m.price) + '</td>';
+            html += tfCell('5m') + tfCell('15m') + tfCell('1h') + tfCell('4h');
+            html += '</tr>';
+          });
+          html += '</table></div>';
+        }
+
+        // VERIFY TIMEOUT
+        const vtEvts = byType['verify_timeout'] || [];
+        vtEvts.forEach(function(ev) {
+          const m = pj(ev);
+          if (m && typeof m === 'object') {
+            const fc = m.fail_counts || {};
+            const blocker = Object.entries(fc).filter(function(e){return e[1]>0;}).map(function(e){return e[0]+':'+e[1];}).join(' \xb7 ');
+            html += '<div style="margin:6px 0;padding:6px;background:#1a0a00;border:1px solid #78350f;border-radius:4px;font-size:9px">';
+            html += '<span style="color:#fbbf24;font-weight:bold">&#9888; VERIFY TIMEOUT</span>';
+            html += '<span style="color:#6b7280;margin-left:8px">' + ts(ev) + ' \xb7 ' + (m.elapsed_sec||0) + 's \xb7 ' + (m.iterations||0) + ' checks</span>';
+            if (blocker) html += '<div style="color:#f87171;margin-top:2px">Fails: ' + blocker + '</div>';
+            if (m.in_zone_snapshots > 0) html += '<div style="color:#9ca3af">In-zone: ' + m.in_zone_snapshots + ' snapshots</div>';
+            html += '</div>';
+          } else {
+            const raw = ev.message || '';
+            html += '<div style="margin:6px 0;color:#fbbf24;font-size:9px">&#9888; VERIFY TIMEOUT ' + ts(ev) + ' — ' + raw.substring(0,120) + '</div>';
+          }
+        });
+
+        // TRIGGER
+        const trigEv = (byType['trigger_snapshot']||[])[0];
+        if (trigEv) {
+          const m = pj(trigEv) || {};
+          html += '<div style="margin:8px 0;padding:6px 8px;background:#0a1220;border-left:3px solid #3b82f6">';
+          html += '<div style="color:#60a5fa;font-weight:bold">&#9889; SETUP TRIGGERED  ' + ts(trigEv) + ' IST  |  ' + (m.trigger_tf||'?') + ' ' + (m.direction||'') + ' OB  |  BTC ' + fp(m.trigger_price) + '</div>';
+          html += '<div style="color:#6b7280;font-size:9px">Zone: ' + fp(m.zone_bottom) + '–' + fp(m.zone_top) + ' | Mid ' + fp(m.zone_mid) + ' | Grade ' + (m.zone_grade||'?') + ' | Distance \xb1' + Math.abs(((m.trigger_price||0)-(m.zone_mid||0))).toFixed(0) + 'pts</div>';
+          html += '</div>';
+        }
+
+        // TRADE ENTRY
+        const entryEv = (byType['entry_snapshot']||[])[0];
+        if (entryEv) {
+          const m = pj(entryEv) || {};
+          const tgt = m.targets || {};
+          html += '<div style="margin:8px 0;padding:8px;background:#051205;border:1px solid #166534;border-radius:4px">';
+          html += '<div style="color:#4ade80;font-weight:bold;margin-bottom:4px">&#9989; TRADE ENTERED  ' + ts(entryEv) + ' IST</div>';
+          html += '<div style="display:grid;grid-template-columns:auto 1fr;gap:2px 10px;font-size:9px">';
+          html += '<span style="color:#6b7280">' + (m.futures_side||'LONG') + ' Futures:</span>';
+          html += '<span style="color:#d1d5db">' + (m.futures_qty||1) + ' BTC @ ' + fp(m.futures_entry) + '</span>';
+          html += '<span style="color:#6b7280">' + (m.direction==='BULLISH'?'PUT':'CALL') + ' Hedge:</span>';
+          html += '<span style="color:#d1d5db">' + (m.hedge_symbol||'?') + ' @ $' + (m.hedge_entry||'?') + ' <span style="color:#4b5563">(TV $' + (m.hedge_tv||'?') + ' \xb7 Intr $' + (m.hedge_intrinsic||'?') + ')</span></span>';
+          if (tgt.partial_trigger_price) {
+            html += '<span style="color:#6b7280">Partial at:</span><span style="color:#9ca3af">fut PnL ≥ $' + (tgt.partial_trigger||'?') + ' → sell 0.5 BTC ≈ ' + fp(tgt.partial_trigger_price) + '</span>';
+          }
+          if (tgt.full_close_price) {
+            html += '<span style="color:#6b7280">Full TP at:</span><span style="color:#9ca3af">fut PnL ≥ $' + (tgt.full_close_target||'?') + ' ≈ ' + fp(tgt.full_close_price) + '</span>';
+          }
+          html += '</div></div>';
+        }
+
+        // MANAGEMENT
+        const mgmtTypes = ['partial_booking','rebuy_set','rebuy_filled','tp_hit'];
+        const mgmtEvts  = evts.filter(function(e){return mgmtTypes.includes(e.event_type);}).sort(function(a,b){return a.created_at>b.created_at?1:-1;});
+        if (mgmtEvts.length > 0) {
+          html += '<div style="margin:8px 0">';
+          html += '<div style="color:#9ca3af;font-size:9px;font-weight:bold;letter-spacing:.05em;margin-bottom:4px">&#128200; MANAGEMENT</div>';
+          mgmtEvts.forEach(function(ev) {
+            const m = pj(ev);
+            let line = '';
+            if (ev.event_type === 'partial_booking') {
+              if (m && typeof m === 'object') {
+                line = '∎ PARTIAL BOOKED  ' + ts(ev) + ' <span style="color:#6b7280"> \xb7 Sold ' + m.sold_qty + ' BTC @ ' + fp(m.sell_price) + ' \xb7 Realized: <span style="color:' + ((m.realized_pnl||0)>=0?'#4ade80':'#f87171') + '">' + fmtp(m.realized_pnl) + '</span></span>';
+              } else {
+                line = '∎ PARTIAL BOOKED  ' + ts(ev) + ' <span style="color:#6b7280">' + (ev.message||'') + '</span>';
+              }
+            } else if (ev.event_type === 'rebuy_set') {
+              if (m && typeof m === 'object') {
+                line = '∎ REBUY SET  ' + ts(ev) + '  <span style="color:#6b7280">@ ' + fp(m.rebuy_price) + ' \xb7 qty=' + m.rebuy_qty + '</span>';
+              } else {
+                line = '∎ REBUY SET  ' + ts(ev) + ' <span style="color:#6b7280">' + (ev.message||'') + '</span>';
+              }
+            } else if (ev.event_type === 'rebuy_filled') {
+              if (m && typeof m === 'object') {
+                line = '∎ REBUY FILLED  ' + ts(ev) + '  <span style="color:#6b7280">@ ' + fp(m.fill_price) + ' \xb7 new avg ' + fp(m.new_avg) + '</span>';
+              } else {
+                line = '∎ REBUY FILLED  ' + ts(ev) + ' <span style="color:#6b7280">' + (ev.message||'') + '</span>';
+              }
+            } else if (ev.event_type === 'tp_hit') {
+              line = '∎ TP HIT  ' + ts(ev) + ' <span style="color:#4ade80">' + (ev.message||'') + '</span>';
+            }
+            if (line) {
+              html += '<div style="padding:3px 8px;border-left:2px solid #1e3a5f;margin:2px 0;font-size:9px;color:#93c5fd">' + line + '</div>';
+            }
+          });
+          html += '</div>';
+        }
+
+        // SQUAREOFF
+        const sqEv = (byType['squareoff']||[])[0];
+        if (sqEv) {
+          const m = pj(sqEv);
+          if (m && typeof m === 'object') {
+            const totalCol = (m.total_pnl||0) >= 0 ? '#4ade80' : '#f87171';
+            html += '<div style="margin:8px 0;padding:8px;background:#0a0a0a;border:1px solid #1f2937;border-radius:4px">';
+            html += '<div style="color:#e5e7eb;font-weight:bold;margin-bottom:4px">&#127937; SQUAREOFF  ' + ts(sqEv) + ' IST</div>';
+            html += '<div style="display:flex;gap:16px;font-size:9px">';
+            html += '<div><span style="color:#6b7280">Futures:</span> <span style="color:' + ((m.fut_pnl||0)>=0?'#4ade80':'#f87171') + '">' + fmtp(m.fut_pnl) + '</span></div>';
+            html += '<div><span style="color:#6b7280">Hedge:</span> <span style="color:' + ((m.hedge_pnl||0)>=0?'#4ade80':'#f87171') + '">' + fmtp(m.hedge_pnl) + '</span></div>';
+            html += '<div style="border-left:1px solid #374151;padding-left:16px"><span style="color:#6b7280">SESSION PnL:</span> <span style="color:' + totalCol + ';font-weight:bold;font-size:11px">' + fmtp(m.total_pnl) + '</span></div>';
+            html += '</div>';
+            if (m.peak_pnl !== undefined) {
+              html += '<div style="color:#4b5563;font-size:8px;margin-top:4px">Peak: ' + fmtp(m.peak_pnl) + ' \xb7 Trough: ' + fmtp(m.trough_pnl) + ' \xb7 Balance: $' + (m.balance_after||'?') + '</div>';
+            }
+            html += '</div>';
+          } else {
+            const raw = sqEv.message || '';
+            const totalM = raw.match(/total=([+-]?\d+\.?\d*)/);
+            const futM   = raw.match(/fut_pnl=([+-]?\d+\.?\d*)/);
+            const hedgM  = raw.match(/hedge_pnl=([+-]?\d+\.?\d*)/);
+            const total  = totalM ? totalM[1] : null;
+            const fut    = futM   ? futM[1]   : null;
+            const hedg   = hedgM  ? hedgM[1]  : null;
+            html += '<div style="margin:8px 0;padding:8px;background:#0a0a0a;border:1px solid #1f2937;border-radius:4px">';
+            html += '<div style="color:#e5e7eb;font-weight:bold">&#127937; SQUAREOFF  ' + ts(sqEv) + ' IST</div>';
+            html += '<div style="font-size:9px;color:#9ca3af">';
+            html += 'Futures: <span style="color:' + (Number(fut)>=0?'#4ade80':'#f87171') + '">' + (fut?fmtp(Number(fut)):'?') + '</span>  \xb7  ';
+            html += 'Hedge: <span style="color:' + (Number(hedg)>=0?'#4ade80':'#f87171') + '">' + (hedg?fmtp(Number(hedg)):'?') + '</span>  \xb7  ';
+            html += 'Total: <span style="color:' + (Number(total)>=0?'#4ade80':'#f87171') + ';font-weight:bold">' + (total?fmtp(Number(total)):'?') + '</span>';
+            html += '</div></div>';
+          }
+        }
+
+        // NO-TRADE CLOSE
+        const ntEv = (byType['no_trade_close']||[])[0];
+        if (ntEv || sessionId.startsWith('notrade_')) {
+          const m = pj(ntEv) || {};
+          const reasonMap = {
+            'verify_timeout': 'VERIFY TIMEOUT — conditions never met simultaneously',
+            'never_in_zone':  'Price never entered OB zone tolerance',
+            'ob_wait':        'No OB zone found — OB Wait mode active',
+            'no_zone':        'No qualifying OB zone found at window open',
+            'window_closed':  'Window closed before conditions were met',
+          };
+          const reasonText = reasonMap[m.reason] || m.reason || 'Window closed — no trade executed';
+          const closest = m.closest_pts > 0 ? 'Closest approach: ' + m.closest_pts + 'pts from ' + (m.closest_tf||'').toUpperCase() + ' zone' : '';
+          const inZone  = m.in_zone_snapshots > 0 ? 'Price was in zone: ' + m.in_zone_snapshots + ' snapshots (~' + (m.in_zone_snapshots*5) + ' min)' : '';
+
+          html += '<div style="margin:8px 0;padding:8px;background:#0f0505;border:1px solid #7f1d1d;border-radius:4px">';
+          html += '<div style="color:#f87171;font-weight:bold;margin-bottom:4px">&#128308; SESSION CLOSED — NO TRADE' + (ntEv ? '  ' + ts(ntEv) + ' IST' : '') + '</div>';
+          html += '<div style="font-size:9px;color:#9ca3af">Reason: ' + reasonText + '</div>';
+          if (closest) html += '<div style="font-size:9px;color:#6b7280">' + closest + '</div>';
+          if (inZone)  html += '<div style="font-size:9px;color:#6b7280">' + inZone  + '</div>';
+          html += '</div>';
+        }
+
+        html += '</div>';
         detailEl.innerHTML = html;
       } catch(e) {
-        detailEl.innerHTML = `<div style="color:#f87171;font-size:10px">Error: ${e.message}</div>`;
+        detailEl.innerHTML = '<div style="color:#f87171;font-size:10px;padding:8px">Error loading session story: ' + e.message + '</div>';
       }
     }
 
@@ -4472,7 +4722,7 @@ async function _updateSessionBanner() {
 
       const _zonesHtml = `<div style="margin-bottom:6px">
         <div style="font-size:7px;text-transform:uppercase;letter-spacing:.08em;color:var(--t3);margin-bottom:3px;display:flex;justify-content:space-between;align-items:center">
-          <span>${_hasObs ? '4-TF Order Block Snapshot' : inWin ? 'Fetching 4-TF OB zones...' : '4-TF OBs locked at window open · ' + ft(startH,startM) + ' IST'}</span>
+          <span>${_hasObs ? '4-TF Order Block Snapshot' : (state === 'SLEEP' && inWin) ? 'Calendar Blackout — Staying SLEEP' : inWin ? 'Fetching 4-TF OB zones...' : '4-TF OBs locked at window open · ' + ft(startH,startM) + ' IST'}</span>
           ${activeTF ? `<span style="color:${key==='bull'?'#4ade80':'#f43f5e'};font-weight:bold">ACTIVE: ${activeTF.toUpperCase()}</span>` : _hasObs ? `<span style="color:#334155">watching all TFs</span>` : ''}
         </div>
         <table style="width:100%;border-collapse:collapse;background:#030712;border-radius:var(--r-sm);overflow:hidden;border:1px solid #0f172a">
@@ -4484,7 +4734,7 @@ async function _updateSessionBanner() {
             <th style="padding:2px 5px;color:var(--t4);font-size:7px;text-align:left;font-weight:normal;text-transform:uppercase">Distance</th>
             <th style="padding:2px 5px;color:var(--t4);font-size:7px;text-align:left;font-weight:normal;text-transform:uppercase">Status</th>
           </tr></thead>
-          <tbody>${_hasObs ? _zoneRows : `<tr><td colspan="6" style="padding:8px;text-align:center;color:var(--t4);font-size:9px">${inWin?'Fetching zones...':'Zones will appear here at next window open'}</td></tr>`}</tbody>
+          <tbody>${_hasObs ? _zoneRows : `<tr><td colspan="6" style="padding:8px;text-align:center;color:var(--t4);font-size:9px">${(state === 'SLEEP' && inWin)?'Calendar Blackout — No zones fetched':inWin?'Fetching zones...':'Zones will appear here at next window open'}</td></tr>`}</tbody>
         </table>
         ${_hasObs ? `<div style="font-size:8px;color:var(--t4);margin-top:2px;padding:0 2px">Tol: ${_OB_TFS_D.map(t=>`${t.toUpperCase()}:±${CFG[pfx+'ob_'+t+'_tolerance']||100}pts`).join(' · ')} · Qty: ${_OB_TFS_D.map(t=>`${t.toUpperCase()}:${CFG[pfx+'ob_'+t+'_qty']||1}BTC`).join(' · ')}</div>` : ''}
       </div>`;
@@ -4569,8 +4819,7 @@ async function _updateSessionBanner() {
         }).join('');
 
         const _obsNote = !_hasObs
-          ? (inWin ? `<div style="padding:8px;text-align:center;color:var(--t3);font-size:9px">Fetching zones at window open...</div>`
-                   : `<div style="padding:8px;text-align:center;color:var(--t4);font-size:9px">Zones locked at window open ${ft(startH,startM)} IST · ${_wfCd.text}</div>`)
+          ? ((state === 'SLEEP' && inWin) ? `<div style="padding:8px;text-align:center;color:var(--t4);font-size:9px">Calendar Blackout — Staying SLEEP</div>` : inWin ? `<div style="padding:8px;text-align:center;color:var(--t3);font-size:9px">Fetching zones at window open...</div>` : `<div style="padding:8px;text-align:center;color:var(--t4);font-size:9px">Zones will appear here at next window open</div>`)
           : (obWait ? `<div style="padding:4px;color:#f59e0b;font-size:8px;text-align:center">⏳ No ${zoneType} zone at open — scanning every candle close${obWaitSince?' · since '+obWaitSince.substring(11,16):''}</div>` : '');
 
         const _analysisTable = `<div style="margin-bottom:4px">
