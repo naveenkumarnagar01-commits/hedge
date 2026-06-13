@@ -54,6 +54,9 @@ services:
       REDIS_URL:    redis://redis:6379
       HOST:         0.0.0.0
       PORT:         "8000"
+      DB_PATH:      /app/data/hedge_state.db
+    volumes:
+      - hedge_sqlite_data:/app/data
     ports:
       - "8000:8000"
     depends_on:
@@ -89,3 +92,4 @@ services:
 
 volumes:
   postgres_data:
+  hedge_sqlite_data:
