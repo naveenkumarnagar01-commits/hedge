@@ -166,6 +166,133 @@ async def get_session_info():
     return {**session_info_str(expiry_h, expiry_m), "ts_ist": ist_now_str()}
 
 
+@app.get("/api/system-health")
+async def get_system_health():
+    """
+    Full system readiness check — called by panel on load.
+    Returns per-component status so the panel can show green/red for each.
+    """
+    import time as _time
+    from backend.data.spot_feed    import get_state as spot_state
+    from backend.data.futures_feed import get_state as fut_state, get_verified_mark
+    from backend.data.options_feed import get_chain, get_feed_info
+    import backend.main as m
+
+    now = _time.time()
+    checks = {}
+
+    # ── 1. Database ──────────────────────────────────────────────────────────
+    db_ok  = False
+    db_msg = "Not connected"
+    try:
+        if store._db_path:
+            import sqlite3
+            with sqlite3.connect(store._db_path) as c:
+                c.execute("SELECT 1 FROM paper_trades LIMIT 1")
+            db_ok  = True
+            db_msg = "SQLite connected & writable"
+        if store._pg_pool:
+            db_msg += " · PostgreSQL KV active"
+    except Exception as e:
+        db_msg = f"Error: {e}"
+    checks["database"] = {"ok": db_ok, "label": "Database", "detail": db_msg}
+
+    # ── 2. BTC Price Feed ────────────────────────────────────────────────────
+    spot  = spot_state()
+    bid   = float(spot.get("bid") or 0)
+    bid_ts= float(spot.get("ts") or 0)
+    spot_age = round(now - bid_ts, 1) if bid_ts else 999
+    feed_ok  = bid > 0 and spot_age < 10
+    checks["price_feed"] = {
+        "ok":     feed_ok,
+        "label":  "BTC Price Feed",
+        "detail": f"${bid:,.0f} · {spot_age:.0f}s ago" if feed_ok else "No data",
+    }
+
+    # ── 3. Options Chain ─────────────────────────────────────────────────────
+    chain = get_chain()
+    opts_ok = len(chain) >= 10
+    feed_info = get_feed_info()
+    expiry_str = feed_info.get("expiry_label", "unknown")
+    checks["options_feed"] = {
+        "ok":     opts_ok,
+        "label":  "Options Chain",
+        "detail": f"{len(chain)} strikes · {expiry_str}" if opts_ok else "No chain data",
+    }
+
+    # ── 4. Journal Engine ────────────────────────────────────────────────────
+    journal_ok  = db_ok
+    journal_msg = "Ready — sessions will auto-create at window open" if journal_ok else "DB not writable"
+    checks["journal"] = {"ok": journal_ok, "label": "Journal Engine", "detail": journal_msg}
+
+    # ── 5. Traders ───────────────────────────────────────────────────────────
+    bull_state = getattr(getattr(m, "bullish", None), "state", None)
+    bear_state = getattr(getattr(m, "bearish", None), "state", None)
+    vol_state  = getattr(getattr(m, "volatile", None), "_state", None)
+    traders_ok = bull_state is not None and bear_state is not None
+    checks["traders"] = {
+        "ok":     traders_ok,
+        "label":  "Traders",
+        "detail": (
+            f"Bull: {bull_state.value if bull_state else '?'} · "
+            f"Bear: {bear_state.value if bear_state else '?'} · "
+            f"Vol: {vol_state.value if vol_state else '?'}"
+        ) if traders_ok else "Not initialized",
+    }
+
+    # ── 6. Next Session ──────────────────────────────────────────────────────
+    try:
+        from backend.utils import ist_now, is_in_session_range
+        from datetime import timedelta
+        n     = ist_now()
+        exp_h = int(getattr(cfg, "session_expiry_h", 13))
+        exp_m = int(getattr(cfg, "session_expiry_m", 30))
+        ts_h  = int(getattr(cfg, "bull_trade_start_h") or 4)
+        ts_m  = int(getattr(cfg, "bull_trade_start_m") or 0)
+        te_h  = int(getattr(cfg, "bull_trade_end_h")   or 18)
+        te_m  = int(getattr(cfg, "bull_trade_end_m")   or 30)
+        in_win = is_in_session_range(n.hour, n.minute, ts_h, ts_m, te_h, te_m, exp_h, exp_m)
+
+        expiry = n.replace(hour=exp_h, minute=exp_m, second=0, microsecond=0)
+        if n >= expiry:
+            expiry += timedelta(days=1)
+        win_open = expiry.replace(hour=ts_h, minute=ts_m, second=0)
+        if n >= win_open:
+            win_open += timedelta(days=1)
+        mins_to_open = int((win_open - n).total_seconds() / 60)
+        h, mn = divmod(mins_to_open, 60)
+        time_label = "WINDOW OPEN NOW" if in_win else f"Opens in {h}h {mn}m"
+        next_label = f"EXP {expiry.strftime('%d/%m/%y')} {exp_h:02d}:{exp_m:02d}"
+        checks["next_session"] = {
+            "ok":     True,
+            "label":  "Next Session",
+            "detail": f"{next_label} · {time_label}",
+        }
+    except Exception as e:
+        checks["next_session"] = {"ok": False, "label": "Next Session", "detail": str(e)}
+
+    # ── 7. OB Pre-fetch status ───────────────────────────────────────────────
+    prefetch_ts = getattr(m, "_ob_prefetch_ts", 0)
+    prefetch_age = round(now - prefetch_ts, 0) if prefetch_ts else None
+    if prefetch_ts and prefetch_age < 3600:
+        ob_detail = f"Candles pre-loaded {int(prefetch_age)}s ago — ready for window open"
+        ob_ok = True
+    else:
+        # Check if we have enough cached candles already
+        from backend.data.futures_feed import get_candles
+        cached = len(get_candles(10, "5m"))
+        ob_ok = cached >= 10
+        ob_detail = f"Cached candles ready ({cached})" if ob_ok else "Will fetch at window open"
+    checks["ob_prefetch"] = {"ok": ob_ok, "label": "OB Data", "detail": ob_detail}
+
+    all_ok = all(v["ok"] for v in checks.values())
+    return {
+        "all_ok":  all_ok,
+        "ts_ist":  ist_now_str(),
+        "checks":  checks,
+    }
+
+
 @app.get("/api/orderbook")
 async def get_orderbook():
     from backend.data.spot_feed    import get_depth as spot_depth

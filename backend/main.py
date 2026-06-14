@@ -158,6 +158,66 @@ async def _squareoff_broadcaster(executor, h_key: str, m_key: str):
             await asyncio.sleep(60)
 
 
+async def _ob_prefetch_task():
+    """
+    Pre-warm OB candle cache 20 minutes before each trading window opens.
+    When the window actually opens, candles are already in memory → OB
+    analysis runs instantly with no Binance HTTP delay.
+    """
+    from backend.data.futures_feed import get_candles, fetch_historical_candles
+    from backend.utils import ist_now
+    from backend.config import cfg as _cfg
+
+    while True:
+        try:
+            n    = ist_now()
+            ts_h = int(getattr(_cfg, "bull_trade_start_h", 4))
+            ts_m = int(getattr(_cfg, "bull_trade_start_m", 0))
+
+            # Compute seconds until (window_open - 20 min)
+            import datetime as _dt
+            today   = n.date()
+            prefetch_time = _dt.datetime.combine(today, _dt.time(ts_h, ts_m),
+                                                  tzinfo=n.tzinfo) - _dt.timedelta(minutes=20)
+            if n >= prefetch_time:
+                prefetch_time += _dt.timedelta(days=1)
+
+            wait_sec = max((prefetch_time - n).total_seconds(), 60)
+            log.info(f"[ob-prefetch] Next pre-warm in {wait_sec/60:.1f}min at {prefetch_time.strftime('%H:%M')} IST")
+            await asyncio.sleep(wait_sec)
+
+            # Pre-fetch all 4 TFs
+            log.info("[ob-prefetch] Pre-warming OB candle cache...")
+            n_candles = int(getattr(_cfg, "ob_candle_count", 500))
+            for tf in ("5m", "15m", "1h", "4h"):
+                try:
+                    cached = get_candles(n_candles, tf)
+                    if len(cached) < 50:
+                        await asyncio.wait_for(fetch_historical_candles(n_candles, tf), timeout=45)
+                        log.info(f"[ob-prefetch] {tf} fetched fresh")
+                    else:
+                        log.info(f"[ob-prefetch] {tf} already cached ({len(cached)} candles)")
+                except asyncio.TimeoutError:
+                    log.warning(f"[ob-prefetch] {tf} fetch timed out — will retry at window open")
+                except Exception as e:
+                    log.warning(f"[ob-prefetch] {tf} error: {e}")
+
+            # Mark timestamp so health endpoint can show "pre-loaded Xs ago"
+            import backend.main as _self
+            _self._ob_prefetch_ts = ist_now().timestamp()
+            log.info("[ob-prefetch] OB cache warm — ready for window open.")
+
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            log.error(f"[ob-prefetch] Error: {e}")
+            await asyncio.sleep(300)
+
+
+# Timestamp of last successful OB pre-fetch (read by /api/system-health)
+_ob_prefetch_ts: float = 0.0
+
+
 async def _state_persister():
     """Persist executor states every 5s for crash recovery."""
     while True:
@@ -309,6 +369,7 @@ async def startup():
     asyncio.create_task(_state_persister())
     asyncio.create_task(_daily_db_backup())
     asyncio.create_task(_health_monitor())
+    asyncio.create_task(_ob_prefetch_task())
 
     log.info("System fully online.")
     log.info(f"  Bullish : {bullish.name}  (paper, 24/7)")

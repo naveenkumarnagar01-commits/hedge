@@ -1370,6 +1370,19 @@
     <div id="session-banner" style="background:linear-gradient(90deg,var(--bg-base) 0%,#071c33 50%,var(--bg-base) 100%);color:#60a5fa;padding:6px 16px;font-size:9px;font-weight:600;letter-spacing:.1em;text-align:center;border-bottom:1px solid rgba(70,120,180,.2);font-family:-apple-system,'Segoe UI',system-ui,sans-serif;text-transform:uppercase">
       Session &nbsp;<span style="color:rgba(70,120,180,.4)">|</span>&nbsp; <span id="sb-range" style="color:#90aecb">—</span> &nbsp;<span style="color:rgba(70,120,180,.4)">|</span>&nbsp; Expiry In &nbsp;<span style="color:rgba(70,120,180,.4)">|</span>&nbsp; <span id="sb-expiry" style="color:#f59e0b;font-weight:700">—</span>
     </div>
+    <!-- ════ SYSTEM HEALTH BAR ════ -->
+    <div id="sys-health-bar" style="background:#020912;border-bottom:1px solid #0f172a;padding:0 16px;overflow:hidden;transition:max-height .3s ease;max-height:36px">
+      <!-- Collapsed row — always visible -->
+      <div style="display:flex;align-items:center;gap:10px;height:36px;cursor:pointer" onclick="_toggleHealthBar()">
+        <span id="sys-health-dot" style="width:7px;height:7px;border-radius:50%;background:#4b5563;flex-shrink:0"></span>
+        <span id="sys-health-label" style="font-size:9px;font-weight:600;letter-spacing:.06em;color:#6b7280;font-family:-apple-system,'Segoe UI',system-ui,sans-serif">CHECKING SYSTEM...</span>
+        <span id="sys-health-detail" style="font-size:9px;color:#374151;margin-left:4px;flex:1"></span>
+        <span id="sys-health-next" style="font-size:9px;color:#4b5563;font-family:monospace"></span>
+        <span style="font-size:8px;color:#1f2937;margin-left:6px" id="sys-health-chevron">▼</span>
+      </div>
+      <!-- Expanded detail grid -->
+      <div id="sys-health-detail-grid" style="padding-bottom:10px;display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:6px"></div>
+    </div>
     <!-- ════ TABS ════ -->
     <div id="nav-bar">
       <div id="sec-row">
@@ -4092,22 +4105,24 @@ async function _updateSessionBanner() {
           return;
         }
 
-        let html = '';
-        for (const sess of sessions) {
+        const _sessCard = (sess, isToday) => {
           const pnl    = sess.total_pnl || 0;
           const pnlCol = pnl >= 0 ? '#4ade80' : '#f87171';
           const pnlSign= pnl >= 0 ? '+' : '';
           const openTs = sess.window_open_ts || sess.entry_ts_ist || sess.created_at || '—';
           const closeTs= sess.close_ts_ist || '—';
-          // Session name: new canonical "EXP DD/MM/YY HH:MM BULL" or fallback to date
           const sesName= sess.display_name || sess.session_date || sess.session_id;
-          const statusLabel = sess.status === 'running' ? '● RUNNING' : sess.status === 'done' ? 'DONE' : (sess.status||'—').toUpperCase();
-          const statusCol   = sess.status === 'running' ? '#4ade80' : '#6b7280';
-          html += `
-            <div style="border:1px solid var(--b1);border-radius:var(--r-sm);margin-bottom:4px;overflow:hidden">
-              <div style="display:flex;justify-content:space-between;align-items:center;padding:5px 10px;background:var(--bg-3);cursor:pointer"
+          const isRunning = sess.status === 'running';
+          const statusLabel = isRunning ? '● RUNNING' : 'DONE';
+          const statusCol   = isRunning ? '#4ade80' : '#6b7280';
+          const borderCol   = isToday ? (isRunning ? '#166534' : '#1e3a5f') : 'var(--b1)';
+          const bgCol       = isToday ? (isRunning ? '#020f05' : '#020813') : 'var(--bg-3)';
+          return `
+            <div style="border:1px solid ${borderCol};border-radius:var(--r-sm);margin-bottom:4px;overflow:hidden">
+              <div style="display:flex;justify-content:space-between;align-items:center;padding:6px 10px;background:${bgCol};cursor:pointer"
                    onclick="_expandJournalSession('${key}','${sess.session_id}',this)">
                 <div style="display:flex;gap:10px;align-items:center">
+                  ${isToday ? '<span style="font-size:8px;font-weight:700;color:#fbbf24;letter-spacing:.08em;background:#1a1100;padding:1px 5px;border-radius:2px">TODAY</span>' : ''}
                   <span style="color:#93c5fd;font-size:10px;font-weight:600;letter-spacing:.03em">${sesName}</span>
                   <span style="font-size:9px;color:#4b5563">Open: ${(openTs||'').substring(11,16)||'—'}</span>
                   <span style="font-size:9px;color:#4b5563">Close: ${(closeTs||'').substring(11,16)||'—'}</span>
@@ -4120,7 +4135,25 @@ async function _updateSessionBanner() {
               </div>
               <div id="sess-detail-${sess.session_id}" style="display:none;padding:6px 8px;background:#060b14"></div>
             </div>`;
+        };
+
+        // Separate today's running sessions from past
+        const todaySessions = sessions.filter(s => s.status === 'running');
+        const pastSessions  = sessions.filter(s => s.status !== 'running');
+
+        let html = '';
+
+        if (todaySessions.length) {
+          html += `<div style="font-size:8px;font-weight:700;letter-spacing:.08em;color:#4ade80;margin:4px 0 6px;padding:0 2px">
+            ▶ CURRENT SESSION</div>`;
+          todaySessions.forEach(s => { html += _sessCard(s, true); });
+          if (pastSessions.length) {
+            html += `<div style="font-size:8px;font-weight:700;letter-spacing:.08em;color:#374151;margin:10px 0 6px;padding:0 2px">
+              PAST SESSIONS</div>`;
+          }
         }
+
+        pastSessions.forEach(s => { html += _sessCard(s, false); });
         root.innerHTML = html;
       } catch(e) {
         root.innerHTML = `<div style="color:#f87171;padding:8px">Error: ${e.message}</div>`;
@@ -9549,6 +9582,64 @@ Balance = $100k - premiums paid + option proceeds + realized futures PnL</div>
 
 
     // ════════════════════════════════════════════════════════════ BOOT
+
+    // ── System Health Bar ────────────────────────────────────────────────────
+    let _healthBarExpanded = false;
+
+    function _toggleHealthBar() {
+      _healthBarExpanded = !_healthBarExpanded;
+      const bar = document.getElementById('sys-health-bar');
+      const chev = document.getElementById('sys-health-chevron');
+      if (_healthBarExpanded) {
+        bar.style.maxHeight = '260px';
+        if (chev) chev.textContent = '▲';
+      } else {
+        bar.style.maxHeight = '36px';
+        if (chev) chev.textContent = '▼';
+      }
+    }
+
+    async function _refreshSystemHealth() {
+      try {
+        const d = await fetch('/api/system-health').then(r => r.json());
+        const dot   = document.getElementById('sys-health-dot');
+        const label = document.getElementById('sys-health-label');
+        const detail= document.getElementById('sys-health-detail');
+        const next  = document.getElementById('sys-health-next');
+        const grid  = document.getElementById('sys-health-detail-grid');
+
+        const allOk = d.all_ok;
+        const checks= d.checks || {};
+
+        // Collapsed row
+        if (dot)   { dot.style.background = allOk ? '#4ade80' : '#f87171'; dot.style.boxShadow = allOk ? '0 0 6px #4ade8088' : '0 0 6px #f8717188'; }
+        if (label) { label.textContent = allOk ? 'SYSTEM FULLY OPERATIONAL' : 'SYSTEM — ISSUES DETECTED'; label.style.color = allOk ? '#4ade80' : '#f87171'; }
+        const failList = Object.values(checks).filter(c => !c.ok).map(c => c.label).join(' · ');
+        if (detail) detail.textContent = failList ? '⚠ ' + failList : '';
+        const ns = checks.next_session;
+        if (next && ns) next.textContent = ns.detail || '';
+
+        // Expanded grid
+        if (grid) {
+          grid.innerHTML = Object.values(checks).map(c => `
+            <div style="display:flex;align-items:flex-start;gap:8px;padding:6px 8px;background:#030712;border-radius:4px;border:1px solid ${c.ok ? '#0f2a1a' : '#2a0f0f'}">
+              <span style="margin-top:1px;width:7px;height:7px;border-radius:50%;background:${c.ok ? '#4ade80' : '#f87171'};flex-shrink:0;box-shadow:0 0 4px ${c.ok ? '#4ade8066' : '#f8717166'}"></span>
+              <div>
+                <div style="font-size:9px;font-weight:600;color:${c.ok ? '#d1d5db' : '#f87171'};letter-spacing:.04em">${c.label}</div>
+                <div style="font-size:8px;color:#6b7280;margin-top:1px">${c.detail || ''}</div>
+              </div>
+            </div>`).join('');
+        }
+      } catch(e) {
+        const label = document.getElementById('sys-health-label');
+        if (label) { label.textContent = 'HEALTH CHECK FAILED'; label.style.color = '#f87171'; }
+      }
+    }
+
+    _refreshSystemHealth();
+    setInterval(_refreshSystemHealth, 30000);
+    // ─────────────────────────────────────────────────────────────────────────
+
     connectWS();
     // Load config at startup so settings sections have correct values
     fetch('/api/config').then(r=>r.json()).then(c=>{ Object.assign(CFG,c); }).catch(()=>{});
