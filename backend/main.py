@@ -272,37 +272,73 @@ async def _daily_db_backup():
 
 async def _health_monitor():
     """
-    Every 30 min: log a heartbeat + send Telegram if feeds are down.
+    Every 30 min: heartbeat log + Telegram if feeds dead.
+    Also auto-restarts feeds that have been silent for >5 min.
     """
-    from backend.data import futures_feed
-    await asyncio.sleep(1800)  # first check after 30min
+    from backend.data import futures_feed, spot_feed, options_feed
+    from backend import telegram_alert as tg
+    import time as _time
+
+    _feed_alert_sent = {"spot": False, "futures": False, "options": False}
+    await asyncio.sleep(300)   # first check after 5 min (give feeds time to connect)
+
     while True:
         try:
             now_str = ist_now_str()
-            price = getattr(futures_feed, "_last_price", 0)
+            now_ts  = _time.time()
+
+            # ── Feed staleness check + auto-restart ───────────────────────
+            def _feed_age(feed_mod, key):
+                st = getattr(feed_mod, "_state", {}) if hasattr(feed_mod, "_state") else {}
+                ts = float(st.get("bid_ts") or st.get("ts") or 0)
+                return now_ts - ts if ts else 9999
+
+            spot_age    = _feed_age(spot_feed, "spot")
+            fut_age     = float(getattr(futures_feed, "_state", {}).get("bid_ts") or 0)
+            fut_age     = now_ts - fut_age if fut_age else 9999
+
+            for name, age, feed_mod, alert_key in [
+                ("Spot",    spot_age, spot_feed,    "spot"),
+                ("Futures", fut_age,  futures_feed,  "futures"),
+            ]:
+                if age > 300:   # >5 min silent → alert + restart
+                    if not _feed_alert_sent[alert_key]:
+                        log.error(f"[watchdog] {name} feed DEAD for {age:.0f}s — restarting")
+                        tg.send(
+                            f"🔴 <b>Feed Dead — Auto-Restart</b>\n"
+                            f"{name} feed silent for {int(age//60)}m {int(age%60)}s\n"
+                            f"Attempting reconnect...\nTime: {now_str}"
+                        )
+                        _feed_alert_sent[alert_key] = True
+                    try:
+                        await feed_mod.stop()
+                        await asyncio.sleep(2)
+                        await feed_mod.start()
+                        log.info(f"[watchdog] {name} feed restarted.")
+                    except Exception as re:
+                        log.error(f"[watchdog] {name} restart failed: {re}")
+                else:
+                    if _feed_alert_sent[alert_key]:
+                        tg.send(f"✅ <b>{name} Feed Recovered</b>\nTime: {now_str}")
+                    _feed_alert_sent[alert_key] = False
+
+            # ── Heartbeat every 30 min ────────────────────────────────────
+            spot_price = float(getattr(spot_feed, "_state", {}).get("last_price") or 0)
             states = {
                 "bull": bullish.state.value  if hasattr(bullish, "state")  else "?",
                 "bear": bearish.state.value  if hasattr(bearish, "state")  else "?",
                 "vol":  volatile._state.value if hasattr(volatile, "_state") else "?",
             }
             log.info(
-                f"[heartbeat] {now_str} | BTC={price:.0f} | "
+                f"[heartbeat] {now_str} | BTC=${spot_price:,.0f} | "
                 f"bull={states['bull']} bear={states['bear']} vol={states['vol']}"
             )
 
-            # Alert if price feed is stale (0 or unchanged for too long)
-            if price == 0:
-                from backend import telegram_alert as tg
-                tg.send(
-                    f"⚠️ <b>Feed Warning</b>\n"
-                    f"BTC price feed may be down (price=0)\n"
-                    f"Time: {now_str}"
-                )
         except asyncio.CancelledError:
             raise
         except Exception as e:
             log.error(f"[heartbeat] Monitor error: {e}")
-        await asyncio.sleep(1800)
+        await asyncio.sleep(300)   # check every 5 min
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -377,12 +413,61 @@ async def startup():
     log.info(f"  Volatile: {volatile.name} (paper, event-driven)")
     log.info("=" * 64)
 
+    # ── Full health check on startup ────────────────────────────────────────
+    await asyncio.sleep(3)   # let feeds settle
+    health_lines = []
+    all_ok = True
+
+    # DB
+    db_ok = bool(store._db_path)
+    health_lines.append(f"{'✅' if db_ok else '❌'} DB: {'SQLite ready' if db_ok else 'NOT CONNECTED'}")
+    if not db_ok: all_ok = False
+
+    # PG
+    if store._pg_pool:
+        health_lines.append("✅ PostgreSQL: KV connected")
+
+    # Price feed
+    from backend.data.spot_feed import get_state as _ss
+    spot_bid = float(_ss().get("bid") or 0)
+    feed_ok  = spot_bid > 0
+    health_lines.append(f"{'✅' if feed_ok else '❌'} BTC Feed: {'$' + f'{spot_bid:,.0f}' if feed_ok else 'NO DATA'}")
+    if not feed_ok: all_ok = False
+
+    # Options
+    from backend.data.options_feed import get_chain as _gc
+    opts = len(_gc())
+    opts_ok = opts >= 10
+    health_lines.append(f"{'✅' if opts_ok else '❌'} Options: {opts} strikes {'ready' if opts_ok else '— LOW'}")
+
+    # Env vars
+    missing_env = [k for k in ["BINANCE_API_KEY", "BINANCE_API_SECRET"] if not os.environ.get(k)]
+    if missing_env:
+        health_lines.append(f"⚠️ Missing env: {', '.join(missing_env)} (paper mode OK)")
+    else:
+        health_lines.append("✅ Env vars: all set")
+
+    # Next session
+    from backend.utils import ist_now as _isn
+    from backend.config import cfg as _cfg
+    from datetime import timedelta as _td
+    _n = _isn()
+    _exp_h = int(getattr(_cfg, "session_expiry_h", 13))
+    _exp_m = int(getattr(_cfg, "session_expiry_m", 30))
+    _expiry = _n.replace(hour=_exp_h, minute=_exp_m, second=0, microsecond=0)
+    if _n >= _expiry: _expiry += _td(days=1)
+    _mins = int((_expiry - _n).total_seconds() / 60)
+    health_lines.append(f"📅 Next expiry: {_expiry.strftime('%d/%m %H:%M IST')} (in {_mins//60}h {_mins%60}m)")
+
+    status_icon = "✅" if all_ok else "⚠️"
     tg.send(
-        f"✅ <b>Hedge Trader ONLINE</b>\n"
-        f"Bull: <b>{bullish.name}</b>\n"
-        f"Bear: <b>{bearish.name}</b>\n"
-        f"Volatile: <b>{volatile.name}</b>\n"
-        f"Time: {ist_now_str()}"
+        f"{status_icon} <b>Hedge Trader ONLINE</b>\n"
+        f"Time: {ist_now_str()}\n\n"
+        + "\n".join(health_lines) +
+        f"\n\n<b>Traders:</b>\n"
+        f"  Bull: {bullish.name}\n"
+        f"  Bear: {bearish.name}\n"
+        f"  Vol:  {volatile.name}"
     )
 
 

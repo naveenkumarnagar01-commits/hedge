@@ -343,21 +343,34 @@ class StateStore:
         }
         if self._db_path:
             loop = asyncio.get_running_loop()
-            try:
-                await loop.run_in_executor(_pool, self._sqlite_insert_paper_trade, row)
-            except Exception as e:
-                log.error(
-                    f"save_paper_trade FAILED — trade NOT in DB! "
-                    f"action={action} symbol={symbol} pnl={pnl} session={session_id} err={e}"
-                )
-                # Retry once with a fresh connection
+            for attempt in range(3):   # 3 attempts before giving up
                 try:
                     await loop.run_in_executor(_pool, self._sqlite_insert_paper_trade, row)
-                    log.info("save_paper_trade retry succeeded.")
-                except Exception as e2:
-                    log.error(f"save_paper_trade retry also failed: {e2}")
+                    break   # success
+                except Exception as e:
+                    if attempt < 2:
+                        log.warning(f"save_paper_trade attempt {attempt+1} failed ({e}) — retrying")
+                        await asyncio.sleep(0.5)
+                    else:
+                        # All 3 attempts failed — Telegram alert
+                        msg = (
+                            f"save_paper_trade FAILED after 3 attempts!\n"
+                            f"action={action} symbol={symbol} pnl={pnl}\n"
+                            f"session={session_id} err={e}"
+                        )
+                        log.error(msg)
+                        try:
+                            from backend import telegram_alert as _tg
+                            _tg.send(f"🚨 <b>DB WRITE FAILED</b>\n{msg}")
+                        except Exception:
+                            pass
         else:
             log.error("save_paper_trade: NO DB PATH — trade lost permanently!")
+            try:
+                from backend import telegram_alert as _tg
+                _tg.send(f"🚨 <b>DB PATH MISSING</b>\nsave_paper_trade called but _db_path is None\naction={action} symbol={symbol}")
+            except Exception:
+                pass
         return row
 
     def _sqlite_get_paper_trades(self, trader_name: str, limit: int) -> list:
