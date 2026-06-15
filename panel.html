@@ -7563,6 +7563,7 @@ async function _updateSessionBanner() {
               { k: 'bull_contract_qty',         l: 'Trade Size (BTC)',         step: 0.01, min: 0.01, max: 1,      note: 'How many BTC to trade per setup. Example: 1 = 1 BTC futures + 1 PUT option contract' },
               { k: 'bull_partial_profit_ratio',  l: 'Partial Profit Trigger',   step: 0.01, min: 0.01, max: 10,     note: 'Sell half futures when profit = this × premium paid. Example: 0.5 = sell 50% futures when profit ≥ 50% of option cost' },
               { k: 'bull_full_close_target',     l: 'Full Close Target ($)',    step: 10,   min: 10,   max: 100000, note: 'Close everything when total profit reaches this. Example: 800 = close when total PnL ≥ $800' },
+              { k: 'bull_rebuy_mode', l: 'Rebuy Level Mode', opts: [{v:'tv_based', l:'avg − 2×TV  (default: price retraces 2× time value)'}, {v:'at_avg', l:'at avg entry  (price must return to exact entry)'}], note: 'Where to set the rebuy limit after partial booking' },
             ]
           },
         ]
@@ -7607,6 +7608,7 @@ async function _updateSessionBanner() {
               { k: 'bear_contract_qty',         l: 'Trade Size (BTC)',       step: 0.01, min: 0.01, max: 1,      note: 'How many BTC to trade. Example: 1 = 1 BTC short futures + 1 CALL option contract' },
               { k: 'bear_partial_profit_ratio',  l: 'Partial Profit Trigger', step: 0.01, min: 0.01, max: 10,     note: 'Sell half futures when profit = this × premium paid. Example: 0.5 = sell when profit ≥ 50% of option cost' },
               { k: 'bear_full_close_target',     l: 'Full Close Target ($)',  step: 10,   min: 10,   max: 100000, note: 'Close everything when total profit reaches this. Example: 800 = close at $800 total PnL' },
+              { k: 'bear_rebuy_mode', l: 'Rebuy Level Mode', opts: [{v:'tv_based', l:'avg + 2×TV  (default: price retraces 2× time value)'}, {v:'at_avg', l:'at avg entry  (price must return to exact entry)'}], note: 'Where to set the rebuy limit after partial booking' },
             ]
           },
         ]
@@ -7843,9 +7845,15 @@ async function _updateSessionBanner() {
           html += '<div style="margin-bottom:8px">' + subLabel + '<div class="param-grid">';
           sub.params.forEach(p => {
             const v = CFG[p.k] ?? '';
-            const isStr = p.step === null;
+            const isStr    = p.step === null;
+            const isSelect = Array.isArray(p.opts);
             let inputEl;
-            if (isStr) {
+            if (isSelect) {
+              const opts = p.opts.map(o =>
+                '<option value="' + o.v + '"' + (String(v) === String(o.v) ? ' selected' : '') + '>' + o.l + '</option>'
+              ).join('');
+              inputEl = '<select id="si-' + p.k + '" class="inp" style="font-size:10px" onchange="onSCStr(\'' + p.k + '\',this)">' + opts + '</select>';
+            } else if (isStr) {
               inputEl = '<input id="si-' + p.k + '" class="inp" type="text" value="' + esc(String(v)) + '" style="width:100%;max-width:320px;font-family:monospace;font-size:10px" oninput="onSCStr(\'' + p.k + '\',this)"/>';
             } else {
               inputEl = '<input id="si-' + p.k + '" class="inp" type="number" step="' + p.step + '" min="' + p.min + '" max="' + p.max + '" value="' + v + '" oninput="onSC(\'' + p.k + '\',this)"/>';

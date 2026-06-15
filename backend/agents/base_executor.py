@@ -1209,13 +1209,14 @@ class BaseExecutor:
 
         paper = self._paper
 
-        sym = itm["symbol"]
-        ask = itm["ask"]
-        qty = self._get_trade_qty()
+        sym  = itm["symbol"]
+        ask  = float(itm.get("ask")  or 0)   # ask = liquidity/spread check only
+        mark = float(itm.get("mark") or ask)  # mark = actual cost basis
+        qty  = self._get_trade_qty()
 
         self.log.info(
             f"[{self.name}] EXECUTE: active_tf={self._active_ob_tf or '?'} qty={qty} "
-            f"hedge={sym} ask={ask:.2f}"
+            f"hedge={sym} ask={ask:.2f} mark={mark:.2f}"
         )
 
         paper.executor = self.name
@@ -1224,10 +1225,9 @@ class BaseExecutor:
         self.session_realized_futures_pnl = 0.0
         self.session_realized_hedge_pnl   = 0.0
 
-        # 1. BUY HEDGE first
+        # 1. BUY HEDGE — balance check uses mark (true cost); fill recorded at mark price
         if self.is_paper:
-            # Check balance BEFORE attempting — if balance floor would be hit, stop immediately
-            cost = ask * qty
+            cost = mark * qty   # true cost = mark, not ask
             if paper.balance - cost < cfg.min_paper_balance:
                 await self._log(
                     f"Insufficient paper balance: ${paper.balance:.2f} - ${cost:.2f} cost "
@@ -1237,34 +1237,35 @@ class BaseExecutor:
                 )
                 self.state = ExState.SLEEP
                 self._eligibility_date = ist_now().strftime("%Y-%m-%d")
-                self.eligible_today    = False   # block re-entry today
+                self.eligible_today    = False
                 return
-            fill = await paper.buy_option(sym, qty, ask, action="HEDGE_BUY")
+            # Paper fill at mark price — ask was already verified for liquidity in verify loop
+            fill = await paper.buy_option(sym, qty, mark, action="HEDGE_BUY")
         else:
             from backend.execution.binance_client import client
+            # Live: place limit @ ask for fill; cost basis tracked as mark
             fill = await client.place_option_order(sym, "BUY", qty, ask,
                                                    timeout_sec=cfg.fill_timeout_sec)
 
         if not fill or not fill.get("filled"):
             await self._log(f"Hedge order not filled within timeout — re-entering hedge verification.", level="WARNING")
-            # Re-enter VERIFY_HEDGE_LOOP (not WAIT_TRIGGER — _do_wait_trigger is undefined)
             self.state = ExState.VERIFY_HEDGE_LOOP
             self._verify_start_time = time.time()
             self._prox_bad_ticks    = 0
             return
 
-        fill_px = float(fill.get("avg_price", ask))
+        # Cost basis = mark price (not ask) — eliminates the bid-ask spread illusion at entry
+        intr = float(itm.get("intrinsic", 0))
+        fill_px = mark   # always use mark as entry cost
         self.hedge_symbol             = sym
         self.hedge_fill_price         = fill_px
         self.hedge_qty                = qty
         self.hedge_premium_paid       = fill_px * qty
-        self.hedge_intrinsic_at_entry = float(itm.get("intrinsic", 0))
-        self.hedge_tv_at_entry        = float(
-            itm.get("time_value") or max(fill_px - self.hedge_intrinsic_at_entry, 0)
-        )
+        self.hedge_intrinsic_at_entry = intr
+        self.hedge_tv_at_entry        = max(fill_px - intr, 0.0)
 
         await self._log(
-            f"HEDGE FILLED: {sym}  fill={fill_px:.2f}  "
+            f"HEDGE FILLED: {sym}  cost@mark={fill_px:.2f}  ask={ask:.2f}  "
             f"premium={self.hedge_premium_paid:.2f} USDT  "
             f"intrinsic={self.hedge_intrinsic_at_entry:.2f}  TV={self.hedge_tv_at_entry:.2f}"
         )
@@ -1430,16 +1431,23 @@ class BaseExecutor:
             "remaining_qty": round(self.futures_remaining_qty, 4),
         })
 
-        # Rebuy at avg_remaining - 2*TV (results in new_avg = avg - TV)
+        # Rebuy level — configurable per trader
+        # "tv_based" (default): avg ∓ 2×TV  → price needs to retrace 2× time value
+        # "at_avg"             : rebuy at entry avg → price needs to return exactly to entry
         tv            = self.hedge_tv_at_entry
         avg_remaining = self.futures_entry_price
-        if self.direction == "BULLISH":
-            rebuy_price = round(avg_remaining - 2 * tv, 2)
-        else:
-            rebuy_price = round(avg_remaining + 2 * tv, 2)
+        rebuy_mode    = str(self._cfg("rebuy_mode") or "tv_based")
 
-        # Store as pending limit — fills when price crosses rebuy_price
-        # (live trading: also places exchange limit order)
+        if rebuy_mode == "at_avg":
+            rebuy_price = round(avg_remaining, 2)
+            rebuy_label = f"at_avg={avg_remaining:.2f}"
+        else:   # tv_based
+            if self.direction == "BULLISH":
+                rebuy_price = round(avg_remaining - 2 * tv, 2)
+            else:
+                rebuy_price = round(avg_remaining + 2 * tv, 2)
+            rebuy_label = f"avg∓2×TV={tv:.2f}"
+
         self.pending_rebuy_price = rebuy_price
         self.pending_rebuy_qty   = qty_sell
 
@@ -1449,13 +1457,14 @@ class BaseExecutor:
 
         await self._log(
             f"PARTIAL SELL DONE: sold {qty_sell} BTC @ {sell_px:.2f}  pnl={sell_pnl:+.2f}  | "
-            f"REBUY LIMIT SET @ {rebuy_price:.2f}  (avg − 2×TV={tv:.2f}) — waits for price to cross"
+            f"REBUY LIMIT SET @ {rebuy_price:.2f}  ({rebuy_label}) — waits for price to cross"
         )
         await self._log_session_event("rebuy_set", {
             "rebuy_price": round(rebuy_price, 2),
             "rebuy_qty":   qty_sell,
             "entry_avg":   round(avg_remaining, 2),
             "tv":          round(tv, 2),
+            "mode":        rebuy_mode,
         })
         self._recalc_price_levels()
 
@@ -1570,17 +1579,14 @@ class BaseExecutor:
             async def _close_option():
                 if not self.hedge_symbol or not self.hedge_qty:
                     return
-                chain2    = get_chain()
-                opt2      = chain2.get(self.hedge_symbol, {})
-                mark_px   = float(opt2.get("mark",      0) or 0)
-                bid_px    = float(opt2.get("bid",       0) or 0)
-                # ALWAYS limit order at mark price for options (never market)
-                limit_px  = mark_px if mark_px > 0 else bid_px
+                chain2   = get_chain()
+                opt2     = chain2.get(self.hedge_symbol, {})
+                limit_px = self._option_sell_price(opt2, self.current_price)
 
                 if self.is_paper:
                     opt_fill = await paper.sell_option(
                         self.hedge_symbol, self.hedge_qty,
-                        limit_px or self.hedge_fill_price * 0.5,
+                        limit_px,
                         action="FORCE_CLOSE_HEDGE")
                 else:
                     from backend.execution.binance_client import client
@@ -1709,22 +1715,19 @@ class BaseExecutor:
             self._is_force_closing = False
 
     async def _sell_hedge_after_futures(self):
-        """Sell hedge at best bid (or market if OTM). Called after futures closed."""
+        """Sell hedge at max(mark, intrinsic). Called after futures closed."""
         paper = self._paper
         from backend.data.options_feed import get_chain
 
         if not self.hedge_symbol or not self.hedge_qty:
             return
 
-        opt_now   = get_chain().get(self.hedge_symbol, {})
-        bid_now   = float(opt_now.get("bid", 0) or 0)
-        # Use helper so intrinsic is computed from live BTC price, not chain's stale field
-        fair_val  = self._hedge_current_value(self.current_price)
-        limit_px  = bid_now if bid_now > 0 else (fair_val * 0.98 if fair_val > 0 else 0)
+        opt_now  = get_chain().get(self.hedge_symbol, {})
+        limit_px = self._option_sell_price(opt_now, self.current_price)
 
         if self.is_paper:
             fill = await paper.sell_option(self.hedge_symbol, self.hedge_qty,
-                                           limit_px or self.hedge_fill_price * 0.5,
+                                           limit_px,
                                            action="HEDGE_SELL")
         else:
             from backend.execution.binance_client import client
@@ -1993,6 +1996,26 @@ class BaseExecutor:
             "message": message,
             "ts_ist":  ist_now_str(),
         }, source=self.name)
+
+    def _option_sell_price(self, opt_data: dict, btc_price: float) -> float:
+        """
+        Sell price for a long option = max(mark_price, intrinsic_value).
+        Rule: never sell below intrinsic — the option is worth at least that much.
+        Ask is NOT used for sell price (we are the seller offering to the market).
+        """
+        mark = float(opt_data.get("mark", 0) or 0)
+        # Recompute intrinsic from live BTC price
+        parts  = self.hedge_symbol.split("-") if self.hedge_symbol else []
+        strike = float(parts[2]) if len(parts) >= 4 else 0.0
+        if strike > 0 and btc_price > 0:
+            if self._option_side == "P":
+                intr = max(strike - btc_price, 0.0)
+            else:
+                intr = max(btc_price - strike, 0.0)
+        else:
+            intr = 0.0
+        sell_px = max(mark, intr)
+        return sell_px if sell_px > 0 else (self.hedge_fill_price * 0.5)
 
     async def _log_session_event(self, event_type: str, message = ""):
         """Persist a key event to session_event_log. message can be str or dict (auto JSON-encoded)."""

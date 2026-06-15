@@ -54,6 +54,7 @@ class Config:
     # Profit management
     bull_partial_profit_ratio:   float = 1.10     # trigger 50% futures sell at premium × ratio
     bull_session_pnl_target:     float = 600.0    # total futures PnL target for session (USDT)
+    bull_rebuy_mode:             str   = "tv_based"  # "tv_based"=avg-2×TV | "at_avg"=rebuy at entry avg
 
     # Legacy alias kept so old DB configs restore without KeyError
     bull_n_hours:                float = 2.0
@@ -85,6 +86,7 @@ class Config:
 
     bear_partial_profit_ratio:   float = 1.10
     bear_session_pnl_target:     float = 600.0
+    bear_rebuy_mode:             str   = "tv_based"  # "tv_based"=avg+2×TV | "at_avg"=rebuy at entry avg
 
     bear_n_hours:                float = 2.0
     bear_n_points:               float = 150.0
