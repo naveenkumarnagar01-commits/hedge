@@ -635,7 +635,7 @@ async def get_manager_logs(limit: int = 100):
 _FIELD_RANGES = {
     "_h": (0, 23),
     "_m": (0, 59),
-    "_qty": (0.001, 10.0),
+    "_qty": (0.001, 1000.0),
     "_premium": (10.0, 20000.0),
     "_target": (10.0, 20000.0),
     "_premium_max": (10.0, 20000.0),

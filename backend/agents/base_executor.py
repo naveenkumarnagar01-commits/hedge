@@ -2,17 +2,20 @@
 BaseExecutor — self-contained trading engine.
 
 Each executor is fully independent:
-  - Fetches nearest Order Block zone at window open (demand for bull, supply for bear)
+  - Entry on window open when all conditions met (ITM, ask ≤ max, TV ≤ max, spread ≤ max)
+  - No Order Block zone required — entry is purely condition-based
+  - OB data still fetched in background for panel display only
   - Manages own $100k virtual balance via dedicated paper engine
-  - Tracks position lifecycle: SLEEP → VERIFY → EXECUTE → MANAGING → SQUAREOFF
+  - Tracks position lifecycle: SLEEP → VERIFY_HEDGE_LOOP → EXECUTE → MANAGING → SQUAREOFF
 
 Key rules:
   - Trading window: Mon–Fri only (weekends auto-skip)
   - Options are NEVER sold before squareoff time
   - Squareoff sequence: harvest profitable leg first → then other (both limit/market)
-  - Partial booking: sell 50% futures when fut_pnl >= premium × ratio
-  - Rebuy limit: avg ± 2×TV (only fills when price crosses that level)
-  - Full TP: based on session_pnl_target (futures only, adjusts after partial)
+  - Partial booking: sell 50% futures when price reaches entry + (premium_paid / qty)
+  - Rebuy limit: avg ± TV/2 for first trader | avg (exact) for second trader
+  - Full TP: total_pnl (futures unrealised + hedge unrealised) >= session_pnl_target
+  - Strike clash: Bear CALL strike must be >= Bull PUT strike (prevents conflicting positions)
   - Per-trader config via self._cfg(key) which prepends bull_/bear_/vol_ prefix
 """
 
@@ -57,6 +60,8 @@ class BaseExecutor:
       _cfg_prefix            -> "bull_" | "bear_" | "vol_"
       _is_eligible(price, target_line)   -> bool
     """
+
+    _EXECUTOR_REGISTRY: dict = {}  # class-level: name → instance (populated in start())
 
     def __init__(self, name: str, direction: str,
                  is_paper: bool = False, force_window: bool = False,
@@ -129,7 +134,11 @@ class BaseExecutor:
         self._verify_last_fail: str = ""
         self._last_price_watch_dist: float = 0.0  # dedup: only log when distance changes >100 pts
         # Per-condition fail counters for the current verify loop (reset on entry)
-        self._verify_fail_counts: dict = {"prox": 0, "prem": 0, "tv": 0, "spread": 0, "no_itm": 0}
+        self._verify_fail_counts: dict = {"prem": 0, "tv": 0, "spread": 0, "no_itm": 0, "strike_clash": 0}
+
+        # True if this executor entered while the other directional trader already had a position.
+        # Determines rebuy strategy: second trader rebuys at exact avg (not avg ± TV/2).
+        self._entered_as_second_trader: bool = False
 
         # Full analysis report — stored after self-analysis, shown in "Check Details"
         self.analysis_report: dict = {}
@@ -194,8 +203,7 @@ class BaseExecutor:
         bus.subscribe(TICK_FUTURES,    self._on_price)
         bus.subscribe(SQUAREOFF_START, self._on_squareoff_broadcast)
         bus.subscribe(SET_LINES,       self._on_set_lines)
-        from backend.message_bus import CANDLE_CLOSE
-        bus.subscribe(CANDLE_CLOSE,    self._on_candle_close)
+        BaseExecutor._EXECUTOR_REGISTRY[self.name] = self
 
         # Crash recovery from SQLite
         saved = store.get(f"{self.name}_state")
@@ -237,6 +245,7 @@ class BaseExecutor:
                     self.name, "EXPIRED_AT_STARTUP", self.hedge_symbol, "SELL",
                     self.hedge_qty, 0.0,
                     -(self.hedge_fill_price * self.hedge_qty),
+                    session_id=self._active_session_id,
                     notes=f"Expired while server offline — entry={self.hedge_fill_price:.2f}",
                     ts_ist=_isn(), ts_utc=_utn())
             self._reset_position()
@@ -400,11 +409,12 @@ class BaseExecutor:
         return None
 
     def _get_trade_qty(self) -> float:
-        """Active TF qty if set; falls back to legacy contract_qty."""
-        if self._active_ob_tf:
-            v = self._ob_tf_cfg(self._active_ob_tf, "qty")
-            if v is not None:
-                return float(v)
+        """Return qty based on first/second trader role; falls back to contract_qty."""
+        other = self._get_other_executor()
+        role = "second_trader" if (other and other.futures_remaining_qty > 0) else "first_trader"
+        v = float(self._cfg(f"{role}_contract_qty") or 0)
+        if v > 0:
+            return v
         return float(self._cfg("contract_qty") or 1.0)
 
     # ── Main loop ──────────────────────────────────────────────────────────
@@ -446,12 +456,9 @@ class BaseExecutor:
             if self.state not in (ExState.MANAGING_POSITION, ExState.PARTIAL_BOOKING):
                 await self._log(f"New session detected ({session_day}). Resetting state to SLEEP.")
                 if self.session_start_ts > 0 or self._active_session_id:
-                    _reason = self._no_trade_reason or ("ob_wait" if self._ob_wait_active else "window_closed")
+                    _reason = self._no_trade_reason or "window_closed"
                     await self._log_session_event("no_trade_close", {
                         "reason":           _reason,
-                        "closest_pts":      round(self._min_zone_distance if self._min_zone_distance < float('inf') else 0, 0),
-                        "closest_tf":       self._closest_approach_tf,
-                        "in_zone_snapshots": self._in_zone_snap_count,
                         "window_close_ts":  ist_now_str(),
                     })
                     if self._active_session_id:
@@ -459,10 +466,7 @@ class BaseExecutor:
                             session_id=self._active_session_id, trader_name=self.name,
                             close_reason=_reason, close_ts_ist=ist_now_str(), status="done",
                         )
-                    self._min_zone_distance   = float('inf')
-                    self._closest_approach_tf = ""
-                    self._in_zone_snap_count  = 0
-                    self._no_trade_reason     = ""
+                    self._no_trade_reason = ""
                 await self._reset_daily()
 
         # ── FORCE_CLOSE recovery (crash-recovery guard) ────────────────────
@@ -523,12 +527,9 @@ class BaseExecutor:
                     level="WARNING"
                 )
                 if self.session_start_ts > 0 or self._active_session_id:
-                    _reason = self._no_trade_reason or ("ob_wait" if self._ob_wait_active else "never_in_zone")
+                    _reason = self._no_trade_reason or "force_close_time"
                     await self._log_session_event("no_trade_close", {
                         "reason":           _reason,
-                        "closest_pts":      round(self._min_zone_distance if self._min_zone_distance < float('inf') else 0, 0),
-                        "closest_tf":       self._closest_approach_tf,
-                        "in_zone_snapshots": self._in_zone_snap_count,
                         "window_close_ts":  ist_now_str(),
                     })
                     if self._active_session_id:
@@ -536,10 +537,7 @@ class BaseExecutor:
                             session_id=self._active_session_id, trader_name=self.name,
                             close_reason=_reason, close_ts_ist=ist_now_str(), status="done",
                         )
-                    self._min_zone_distance   = float('inf')
-                    self._closest_approach_tf = ""
-                    self._in_zone_snap_count  = 0
-                    self._no_trade_reason     = ""
+                    self._no_trade_reason = ""
                 await self._reset_daily()
                 await self._save_state()
                 return
@@ -559,109 +557,62 @@ class BaseExecutor:
         # ── SLEEP ────────────────────────────────────────────────────────────
         if self.state == ExState.SLEEP:
             if in_window:
-                # Guard B: candle-data failure with retry cooldown
-                if (self._eligibility_date == session_day
-                        and self.eligible_today is False
-                        and not self.locked_high_line):
-                    retry_after = getattr(self, "_analysis_retry_after", 0)
-                    if retry_after and time.time() < retry_after:
-                        await self._publish_monitor(p, in_window)
-                        return
-
-                # Guard C: OB wait-mode — no zone yet, watching for candle-close
-                if getattr(self, "_ob_wait_active", False):
-                    await self._publish_monitor(p, in_window)
-                    return
-
-                # Guard D: already blocked for today (timed out / force-closed / blackout)
+                # Guard: already blocked for today (squareoff / TP hit / force-close)
                 if self.eligible_today is False and self._eligibility_date == session_day:
                     await self._publish_monitor(p, in_window)
                     return
-
 
                 # Mark session start once
                 if self.session_start_ts == 0.0:
                     self.session_start_ts = time.time()
                     if self._paper is not None:
                         self._paper.clear_session_trades()
-                    await self._log_session_event("session_start",
+                    await self._log_session_event("window_open",
                         f"direction={self.direction} "
                         f"window={_ts_h:02d}:{_ts_m:02d}–{_te_h:02d}:{_te_m:02d} IST "
                         f"squareoff={_fc_h:02d}:{_fc_m:02d} IST price={p:.0f}")
 
-                # Load OBs if not done for this session
-                if not self._session_obs or self._eligibility_date != session_day:
-                    self.state = ExState.CHECK_ELIGIBILITY
-                    await self._publish_monitor(p, in_window)
-                    return
-
-                # OBs loaded — check if price is currently in ANY OB zone
-                active = self._find_active_ob_tf(p)
-                if active:
-                    active_tf, active_zone = active
-                    self._active_ob_tf     = active_tf
-                    self.trigger_line      = float(active_zone.get("mid", self.trigger_line or p))
-                    self.entry_zone        = "near_ob"
-                    self.trigger_type      = f"ob_{active_tf}"
-                    self._loop_iter        = 0
-                    self._far_check        = None
-                    self.triggered         = True
-                    self.trigger_time      = ist_now_str()
-                    self._verify_start_time = time.time()
-                    self._prox_bad_ticks   = 0
-                    self._verify_last_fail  = ""
-                    self._verify_fail_counts = {"prox": 0, "prem": 0, "tv": 0, "spread": 0, "no_itm": 0}
-                    self.state = ExState.VERIFY_HEDGE_LOOP
-                    zone_type = "demand" if self.direction == "BULLISH" else "supply"
-                    await self._log(
-                        f"ELIGIBLE | Price ${p:.0f} in {active_tf} {zone_type} OB "
-                        f"mid=${self.trigger_line:.0f} | All 4 conditions must pass."
+                # Create session record once
+                if not self._active_session_id:
+                    self._active_session_id = self._compute_session_id()
+                    self._eligibility_date  = session_day
+                    await store.save_session(
+                        session_id=self._active_session_id,
+                        trader_name=self.name,
+                        session_date=session_day,
+                        status="running",
+                        window_open_ts=ist_now_str(),
+                        display_name=self._session_display_name(),
                     )
-                    await self._log_session_event("trigger_snapshot", {
-                        "trigger_tf":   active_tf,
-                        "trigger_price": round(p, 1),
-                        "zone_mid":     round(self.trigger_line, 1),
-                        "zone_top":     round(float(active_zone.get("top", self.trigger_line)), 1),
-                        "zone_bottom":  round(float(active_zone.get("bottom", self.trigger_line)), 1),
-                        "zone_grade":   active_zone.get("grade", ""),
-                        "buffer_pts":   float(self._ob_tf_cfg(active_tf, "tolerance") or 100),
-                        "direction":    self.direction,
-                        "all_4tf_zones": {
-                            tf: {
-                                "mid":    round(float((self._session_obs.get(tf, {}).get(zone_type) or {}).get("mid", 0) or 0), 1),
-                                "top":    round(float((self._session_obs.get(tf, {}).get(zone_type) or {}).get("top", 0) or 0), 1),
-                                "bottom": round(float((self._session_obs.get(tf, {}).get(zone_type) or {}).get("bottom", 0) or 0), 1),
-                                "grade":  (self._session_obs.get(tf, {}).get(zone_type) or {}).get("grade", ""),
-                            }
-                            for tf in ("5m", "15m", "1h", "4h")
-                            if self._session_obs.get(tf, {}).get(zone_type)
-                        },
-                    })
-                    history = store.get(f"{self.name}_triggers", [])
-                    history.append({
-                        "ts": self.trigger_time, "trigger_type": self.trigger_type,
-                        "entry_zone": self.entry_zone,
-                        "trigger_line": round(self.trigger_line, 2),
-                        "price": round(p, 2), "result": "pending",
-                    })
-                    if len(history) > 100:
-                        history = history[-100:]
-                    await store.set(f"{self.name}_triggers", history)
-                    await self._save_state()
-                    await self._broadcast_position()
+                    self.log.info(f"Session created: {self._active_session_id}")
+
+                # Enter VERIFY_HEDGE_LOOP immediately — no OB zone proximity required
+                self.trigger_type        = "window_open"
+                self.triggered           = True
+                self.trigger_time        = ist_now_str()
+                self.entry_zone          = "window_open"
+                self._loop_iter          = 0
+                self._far_check          = None
+                self._verify_start_time  = time.time()
+                self._prox_bad_ticks     = 0
+                self._verify_last_fail   = ""
+                self._verify_fail_counts = {"prem": 0, "tv": 0, "spread": 0, "no_itm": 0, "strike_clash": 0}
+                self.state = ExState.VERIFY_HEDGE_LOOP
+                await self._log(
+                    f"Window open — entering VERIFY_HEDGE_LOOP directly. "
+                    f"Watching: ITM option, ask ≤ max, TV ≤ max, spread ≤ max."
+                )
+                await self._save_state()
+                await self._broadcast_position()
             await self._publish_monitor(p, in_window)
             return
 
         # ── CHECK_ELIGIBILITY ────────────────────────────────────────────────
+        # Crash-recovery: old DB had this state. Redirect to SLEEP immediately;
+        # the SLEEP handler will re-enter VERIFY_HEDGE_LOOP on the next tick.
         if self.state == ExState.CHECK_ELIGIBILITY:
-            # Guard: window must still be open — window can close in the same tick
-            if not in_window:
-                await self._log("Window closed before eligibility completed. Back to SLEEP.")
-                await self._reset_daily()
-                await self._publish_monitor(p, False)
-                return
-            await self._do_eligibility_check(p, in_window)
-            await self._broadcast_position()   # push fresh analysis_report to panel immediately
+            await self._log("CHECK_ELIGIBILITY (crash-recovery) → going SLEEP.")
+            self.state = ExState.SLEEP
             await self._publish_monitor(p, in_window)
             return
 
@@ -946,147 +897,128 @@ class BaseExecutor:
 
     async def _do_verify_hedge(self, price: float, in_window: bool):
         """
-        Continuous 1s loop. All 4 conditions must pass simultaneously to execute:
-          1. Proximity  : price within max_distance_from_line pts of trigger line
-          2. Premium    : option ask ≤ max_premium
-          3. Time Value : option TV ≤ max_time_value
-          4. Spread     : ask/mark spread ≤ price_diff_percent %
+        Continuous 1s loop. All 3 conditions must pass simultaneously to execute:
+          1. ITM + Ask   : option ask ≤ max_premium AND intrinsic > 0 (confirms ITM)
+          2. Time Value  : option TV ≤ max_time_value
+          3. Spread      : |ask − mark| / mark × 100 ≤ price_diff_percent %
+          4. Strike Clash: if other trader has a position, ensure strike compatibility
 
-        No abort on individual condition fail — just keep waiting.
-        Only abort on: timeout or window close.
+        Runs continuously while window is open. Periodic reset every timeout_sec to
+        clear counters and log stats (does NOT exit to SLEEP — loop continues).
+        Only exits on: window close or conditions fully passing (→ EXECUTE).
         """
         timeout = cfg.verify_hedge_timeout_sec
         self._loop_iter += 1
 
-        # Timeout — only hard abort besides window close
+        # Periodic stats reset (keeps counters fresh; does NOT abort to SLEEP)
         elapsed = time.time() - self._verify_start_time
         if elapsed > timeout:
-            await self._log(
-                f"VERIFY TIMEOUT: no conditions fully met in {elapsed:.0f}s "
-                f"(limit={timeout}s). Back to SLEEP.",
-                level="WARNING"
-            )
-            self._update_last_trigger_result("aborted-timeout")
             fc = self._verify_fail_counts
-            await self._log_session_event("verify_timeout", {
-                "elapsed_sec":      int(elapsed),
-                "iterations":       sum(fc.values()),
-                "last_fail":        self._verify_last_fail,
-                "fail_counts":      dict(fc),
-                "closest_pts":      round(self._min_zone_distance if self._min_zone_distance < float('inf') else 0, 0),
-                "closest_tf":       self._closest_approach_tf,
-                "in_zone_snapshots": self._in_zone_snap_count,
+            await self._log_session_event("verify_loop_reset", {
+                "elapsed_sec": int(elapsed),
+                "iterations":  sum(fc.values()),
+                "last_fail":   self._verify_last_fail,
+                "fail_counts": dict(fc),
             })
-            self._no_trade_reason = "verify_timeout"
-            # Light reset: keep OB data loaded; only reset verify state.
-            # Trader returns to SLEEP and re-triggers when price re-enters any zone.
-            self.triggered           = False
-            self.trigger_type        = ""
-            self.trigger_line        = 0.0
-            self.trigger_time        = ""
             self._loop_iter          = 0
-            self._far_check          = None
-            self._verify_start_time  = 0.0
-            self._prox_bad_ticks     = 0
+            self._verify_start_time  = time.time()
             self._verify_last_fail   = ""
-            self._verify_fail_counts = {"prox": 0, "prem": 0, "tv": 0, "spread": 0, "no_itm": 0}
-            self._active_ob_tf       = ""
-            self.state = ExState.SLEEP
+            self._verify_fail_counts = {"prem": 0, "tv": 0, "spread": 0, "no_itm": 0, "strike_clash": 0}
             await self._save_state()
-            await self._publish_monitor(price, in_window, prox_ok=False)
-            return
 
-        # ── Condition 1 — Multi-TF proximity (smallest active TF wins) ────────
-        active = self._find_active_ob_tf(price)
-        if active:
-            active_tf, active_zone = active
-            self._active_ob_tf = active_tf
-            self.trigger_line  = float(active_zone.get("mid", self.trigger_line))
-            max_dist  = float(self._ob_tf_cfg(active_tf, "tolerance") or 100.0)
-            dist      = abs(price - self.trigger_line)
-            prox_ok   = dist <= max_dist
-            max_prem  = float(self._ob_tf_cfg(active_tf, "max_premium")
-                              or self._cfg("max_premium") or 320.0)
-        else:
-            # Price left all OB zones — exit verify loop, return to SLEEP
-            self._update_last_trigger_result("left-zone")
-            self._active_ob_tf      = ""
-            self.triggered          = False
-            self.trigger_line       = 0.0
-            self.trigger_time       = ""
-            self._loop_iter         = 0
-            self._verify_start_time = 0.0
-            self._prox_bad_ticks    = 0
-            self._verify_last_fail  = ""
-            self._verify_fail_counts = {"prox": 0, "prem": 0, "tv": 0, "spread": 0, "no_itm": 0}
-            self.state = ExState.SLEEP
-            await self._log("Price left all OB zones — back to SLEEP (will re-trigger on re-entry)")
-            await self._save_state()
-            await self._publish_monitor(price, in_window, prox_ok=False)
-            return
-
-        # Condition 2/3/4 — Option eligibility
+        # ── Option eligibility — all 3 conditions ────────────────────────────
         from backend.data.options_feed import get_nearest_itm_put, get_nearest_itm_call
         itm = (get_nearest_itm_put(price) if self._option_side == "P"
                else get_nearest_itm_call(price))
 
-        _per_tv  = self._ob_tf_cfg(active_tf, "max_time_value") if active_tf else None
-        max_tv   = float(_per_tv) if _per_tv is not None else float(self._cfg("max_time_value") or 220.0)
-        max_sprd = self._cfg("price_diff_percent")
+        # Pick per-role limits: second trader = peer already has active position
+        _other_now = self._get_other_executor()
+        _is_second_now = bool(_other_now and _other_now.futures_remaining_qty > 0)
+        _role = "second_trader" if _is_second_now else "first_trader"
+
+        _rp = float(self._cfg(f"{_role}_max_premium") or 0)
+        max_prem = _rp if _rp > 0 else float(self._cfg("max_premium") or 320.0)
+
+        _rt = float(self._cfg(f"{_role}_max_time_value") or 0)
+        max_tv   = _rt if _rt > 0 else float(self._cfg("max_time_value") or 220.0)
+
+        max_sprd = float(self._cfg("price_diff_percent") or 5.0)
 
         prem_ok = spread_ok = tv_ok = None
         ask = mark = intr = tv = sprd = 0.0
         if itm:
-            ask  = float(itm.get("ask") or 0)
+            ask  = float(itm.get("ask")  or 0)
             mark = float(itm.get("mark") or 0)
             intr = float(itm.get("intrinsic") or 0)
             tv   = float(itm.get("time_value") or max(ask - intr, 0))
             sprd = abs(ask - mark) / mark * 100 if mark > 0 else 100.0
-            prem_ok   = ask > 0 and ask <= max_prem
+            prem_ok   = ask > 0 and intr > 0 and ask <= max_prem   # intr>0 confirms ITM
             tv_ok     = tv <= max_tv
             spread_ok = sprd <= max_sprd
 
-        # All 4 must pass at same moment → execute
-        hedge_valid = bool(itm and prox_ok and prem_ok and tv_ok and spread_ok)
+        # ── Strike clash check ────────────────────────────────────────────────
+        clash_ok = True
+        if itm and prem_ok and tv_ok and spread_ok:
+            other = self._get_other_executor()
+            if other and other.hedge_symbol and other.hedge_qty > 0:
+                other_strike = self._parse_strike(other.hedge_symbol)
+                this_strike  = float(itm.get("strike", 0))
+                if other_strike and this_strike:
+                    if self.direction == "BEARISH":
+                        # Bear CALL strike must be >= Bull PUT strike
+                        clash_ok = this_strike >= other_strike
+                    else:
+                        # Bull PUT strike must be <= Bear CALL strike
+                        clash_ok = this_strike <= other_strike
+                    if not clash_ok:
+                        self._verify_fail_counts["strike_clash"] += 1
+                        self._verify_last_fail = (
+                            f"strike_clash({self._option_side}@{this_strike:.0f} "
+                            f"vs other={other_strike:.0f})"
+                        )
+
+        # All conditions must pass at the same moment → execute
+        hedge_valid = bool(itm and prem_ok and tv_ok and spread_ok and clash_ok)
         await self._publish_monitor(
             price, in_window,
             itm=itm, prem_ok=prem_ok, tv_ok=tv_ok, spread_ok=spread_ok,
-            prox_ok=prox_ok, hedge_valid=hedge_valid, dist_from_line=dist,
+            clash_ok=clash_ok, hedge_valid=hedge_valid,
             loop_iter=self._loop_iter,
+            active_role=_role,
+            active_max_premium=max_prem,
+            active_max_tv=max_tv,
         )
 
         if not hedge_valid:
-            fails = []
-            if not prox_ok:
-                self._verify_fail_counts["prox"] += 1
-                tf_tag = self._active_ob_tf or "no_tf"
-                fails.append(f"prox({tf_tag}:{dist:.0f}pts>tol={max_dist})")
-            if not itm:
+            if not clash_ok:
+                pass  # already counted above
+            elif not itm:
                 self._verify_fail_counts["no_itm"] += 1
-                fails.append("no_itm")
+                self._verify_last_fail = "no_itm"
             else:
+                fails = []
                 if prem_ok is False:
                     self._verify_fail_counts["prem"] += 1
-                    fails.append(f"prem({ask:.0f}>max={max_prem})")
+                    fails.append(f"prem(ask={ask:.0f}>max={max_prem:.0f} or intr={intr:.0f}=0)")
                 if tv_ok is False:
                     self._verify_fail_counts["tv"] += 1
                     fails.append(f"tv({tv:.1f}>max={max_tv})")
                 if spread_ok is False:
                     self._verify_fail_counts["spread"] += 1
                     fails.append(f"spread({sprd:.1f}%>max={max_sprd}%)")
-            if fails:
-                self._verify_last_fail = " | ".join(fails)
+                if fails:
+                    self._verify_last_fail = " | ".join(fails)
             return   # keep looping
 
         # All conditions met → EXECUTE
-        # Guard: if state changed externally (e.g. concurrent call), don't double-execute
+        # Guard: if state changed externally (concurrent call), don't double-execute
         if self.state != ExState.VERIFY_HEDGE_LOOP:
             return
         self.state = ExState.EXECUTE
         await self._log(
-            f"All hedge conditions met! Executing:  "
-            f"symbol={itm['symbol']}  ask={itm['ask']:.2f}  "
-            f"intrinsic={itm.get('intrinsic', 0):.2f}  TV={tv:.2f}  spread={sprd:.2f}%"
+            f"All conditions met — executing: "
+            f"symbol={itm['symbol']}  ask={ask:.2f}  "
+            f"intrinsic={intr:.2f}  TV={tv:.2f}  spread={sprd:.2f}%"
         )
         await self._execute(itm, price)
 
@@ -1112,13 +1044,12 @@ class BaseExecutor:
         if total_pnl < self._trough_unrealized_pnl:
             self._trough_unrealized_pnl = total_pnl
 
-        # Session PnL target is FUTURES ONLY (option is never sold before squareoff)
-        # full_close_target is fallback if session_pnl_target not set
-        session_target = (self._cfg("session_pnl_target")
-                          or self._cfg("full_close_target") or 600.0)
+        # Session PnL target checks TOTAL unrealised (futures + hedge combined).
+        # Option is never sold before squareoff, but its unrealised value counts toward TP.
+        session_target   = float(self._cfg("session_pnl_target")
+                                 or self._cfg("full_close_target") or 600.0)
         already_realized = self.session_realized_futures_pnl
-        remaining_needed = session_target - already_realized
-        full_target      = remaining_needed   # hit this with remaining futures position
+        full_target      = session_target - already_realized
 
         # ── Check pending REBUY limit order (price-triggered, paper simulation) ──────
         if self.pending_rebuy_price > 0 and self.pending_rebuy_qty > 0:
@@ -1158,33 +1089,40 @@ class BaseExecutor:
                     "new_avg":      round(new_avg, 2),
                     "realized_pnl": round(self.session_realized_futures_pnl, 2),
                 })
-                self._recalc_price_levels()  # TP levels update with new avg
+                self.partial_done = False      # allow next partial sell cycle
+                self._recalc_price_levels()   # new avg → new partial trigger & full TP price
                 await self._log(
                     f"REBUY LIMIT FILLED @ {rbx_px:.2f}  new_avg={new_avg:.2f}  "
-                    f"qty={new_qty}  new_full_close_price≈{self.full_close_price:.2f}"
+                    f"qty={new_qty}  next_partial≈{self.partial_trigger_price:.2f}  "
+                    f"new_full_close_price≈{self.full_close_price:.2f}"
                 )
                 await self._save_state()
                 await self._broadcast_position()
                 return
 
-        # ── Full close target (futures only — option stays open until squareoff) ────
-        if fut_pnl >= full_target:
+        # ── Full close target (combined PnL — option stays open until squareoff) ────
+        if total_pnl >= full_target:
             # Cancel any pending rebuy before closing
             if self.pending_rebuy_price > 0:
                 await self._log(f"TP hit — cancelling pending rebuy @ {self.pending_rebuy_price:.2f}")
                 self.pending_rebuy_price = 0.0
                 self.pending_rebuy_qty   = 0.0
-            await self._log(f"FULL CLOSE TARGET HIT: total_pnl={total_pnl:.2f} >= {full_target:.2f}")
+            await self._log(f"FULL CLOSE TARGET HIT: total_pnl (fut+hedge)={total_pnl:.2f} >= {full_target:.2f}")
             await self._do_full_close(price)
             return
 
-        # ── Partial booking: one-time trigger ─────────────────────────────────────
-        if not self.partial_done:
-            partial_trigger = self.hedge_premium_paid * self._cfg("partial_profit_ratio")
-            if fut_pnl >= partial_trigger:
+        # ── Partial booking: price-based trigger (price reaches entry + premium/qty) ──
+        if not self.partial_done and self.partial_trigger_price > 0:
+            trigger_hit = (
+                price >= self.partial_trigger_price if self.direction == "BULLISH"
+                else price <= self.partial_trigger_price
+            )
+            if trigger_hit:
                 await self._log(
-                    f"PARTIAL BOOKING TRIGGER: futures_pnl={fut_pnl:.2f} >= "
-                    f"premium×ratio={partial_trigger:.2f}  → selling 50%"
+                    f"PARTIAL BOOKING TRIGGER: price={price:.2f} reached "
+                    f"trigger={self.partial_trigger_price:.2f} "
+                    f"(entry={self.futures_entry_price:.2f} + premium/qty={self.hedge_fill_price:.2f})"
+                    f"  → selling 50%"
                 )
                 self.state = ExState.PARTIAL_BOOKING
                 await self._do_partial_booking(price)
@@ -1207,6 +1145,15 @@ class BaseExecutor:
             await self._log("_execute called but position already active — skipping.", level="WARNING")
             return
 
+        # Track whether the other directional trader already has an active position.
+        # Second trader rebuys at exact avg; first trader rebuys at avg ± TV/2.
+        other = self._get_other_executor()
+        self._entered_as_second_trader = bool(
+            other is not None and other.futures_remaining_qty > 0
+        )
+        if self._entered_as_second_trader:
+            await self._log(f"Entering as SECOND trader (other={other.name} already in position) — rebuy will be at avg.")
+
         paper = self._paper
 
         sym  = itm["symbol"]
@@ -1225,9 +1172,11 @@ class BaseExecutor:
         self.session_realized_futures_pnl = 0.0
         self.session_realized_hedge_pnl   = 0.0
 
-        # 1. BUY HEDGE — balance check uses mark (true cost); fill recorded at mark price
+        # 1. BUY HEDGE — balance deducted at mark (fair value cost basis)
+        # Unrealized PnL = (current_mark − entry_mark) × qty  ← same formula exchanges use
+        # Ask is only used for entry eligibility checks (prem_ok, tv_ok) — not for PnL basis
         if self.is_paper:
-            cost = mark * qty   # true cost = mark, not ask
+            cost = mark * qty
             if paper.balance - cost < cfg.min_paper_balance:
                 await self._log(
                     f"Insufficient paper balance: ${paper.balance:.2f} - ${cost:.2f} cost "
@@ -1239,11 +1188,9 @@ class BaseExecutor:
                 self._eligibility_date = ist_now().strftime("%Y-%m-%d")
                 self.eligible_today    = False
                 return
-            # Paper fill at mark price — ask was already verified for liquidity in verify loop
             fill = await paper.buy_option(sym, qty, mark, action="HEDGE_BUY")
         else:
             from backend.execution.binance_client import client
-            # Live: place limit @ ask for fill; cost basis tracked as mark
             fill = await client.place_option_order(sym, "BUY", qty, ask,
                                                    timeout_sec=cfg.fill_timeout_sec)
 
@@ -1254,9 +1201,11 @@ class BaseExecutor:
             self._prox_bad_ticks    = 0
             return
 
-        # Cost basis = mark price (not ask) — eliminates the bid-ask spread illusion at entry
+        # Entry cost basis = mark price.
+        # Unrealized PnL = (current_mark − mark_at_entry) × qty
+        # Time value at entry = mark − intrinsic (used for rebuy level calculation)
         intr = float(itm.get("intrinsic", 0))
-        fill_px = mark   # always use mark as entry cost
+        fill_px = mark
         self.hedge_symbol             = sym
         self.hedge_fill_price         = fill_px
         self.hedge_qty                = qty
@@ -1265,7 +1214,7 @@ class BaseExecutor:
         self.hedge_tv_at_entry        = max(fill_px - intr, 0.0)
 
         await self._log(
-            f"HEDGE FILLED: {sym}  cost@mark={fill_px:.2f}  ask={ask:.2f}  "
+            f"HEDGE FILLED: {sym}  entry@mark={fill_px:.2f}  ask={ask:.2f}  "
             f"premium={self.hedge_premium_paid:.2f} USDT  "
             f"intrinsic={self.hedge_intrinsic_at_entry:.2f}  TV={self.hedge_tv_at_entry:.2f}"
         )
@@ -1304,10 +1253,12 @@ class BaseExecutor:
         self.execution_time_ist    = ist_now_str()
         self._recalc_price_levels()
 
+        _session_tgt = float(self._cfg("session_pnl_target") or self._cfg("full_close_target") or 600)
         await self._log(
             f"FUTURES FILLED: {side} {qty} BTC @ {fut_px:.2f}  "
-            f"Partial trigger @ futures_pnl >= {self.hedge_premium_paid * self._cfg('partial_profit_ratio'):.2f}  "
-            f"Full close target = {self._cfg('full_close_target'):.2f} USDT"
+            f"Partial trigger @ price={self.partial_trigger_price:.2f}  "
+            f"(entry + premium/qty = {fut_px:.2f} + {self.hedge_fill_price:.2f})  "
+            f"Full close target (combined PnL) = {_session_tgt:.2f} USDT"
         )
         await store.log_trade(self.name, fut_side_action, "BTCUSDT", side,
                               qty, fut_px, 0.0, "FILLED", {}, self.is_paper)
@@ -1315,7 +1266,7 @@ class BaseExecutor:
         # Reset peak/trough tracking for this new trade
         self._peak_unrealized_pnl   = 0.0
         self._trough_unrealized_pnl = 0.0
-        self._verify_fail_counts    = {"prox": 0, "prem": 0, "tv": 0, "spread": 0, "no_itm": 0}
+        self._verify_fail_counts    = {"prem": 0, "tv": 0, "spread": 0, "no_itm": 0, "strike_clash": 0}
 
         self.state = ExState.MANAGING_POSITION
         self._update_last_trigger_result("executed")
@@ -1346,17 +1297,18 @@ class BaseExecutor:
                 "age_bars": _zone.get("age_bars"),
             } if _zone else None,
             "conditions_at_entry": {
-                "max_ask":   float(_c("max_premium") or 320),
-                "max_tv":    float(_c("max_time_value") or 220),
+                "max_ask":        float(_c("max_premium") or 320),
+                "max_tv":         float(_c("max_time_value") or 220),
                 "max_spread_pct": float(_c("price_diff_percent") or 5),
-                "buffer_pts": float(self._ob_tf_cfg(self._active_ob_tf or "15m", "tolerance") or 100),
             },
             "targets": {
                 "partial_trigger_price": round(self.partial_trigger_price, 2),
                 "full_close_price":      round(self.full_close_price, 2),
                 "session_target":        float(_c("session_pnl_target") or _c("full_close_target") or 600),
-                "partial_ratio":         float(_c("partial_profit_ratio") or 1.1),
+                "partial_mode":          "price_covers_premium",
+                "rebuy_mode":            "at_avg" if self._entered_as_second_trader else "tv_half",
             },
+            "is_second_trader": self._entered_as_second_trader,
         })
 
         # Persist ALL trades to structured SQLite paper_trades table
@@ -1391,7 +1343,10 @@ class BaseExecutor:
 
     async def _do_partial_booking(self, price: float):
         """
-        Sell 50% futures → rebuy same qty at avg - 2*TV (=> new_avg = avg - TV).
+        Sell 50% futures → place rebuy limit order.
+        Rebuy level:
+          - First trader  (entered alone): avg ± TV/2
+          - Second trader (other already active): avg exactly (tighter, both hedging each other)
         Hedge remains untouched.
         """
         paper = self._paper
@@ -1431,22 +1386,26 @@ class BaseExecutor:
             "remaining_qty": round(self.futures_remaining_qty, 4),
         })
 
-        # Rebuy level — configurable per trader
-        # "tv_based" (default): avg ∓ 2×TV  → price needs to retrace 2× time value
-        # "at_avg"             : rebuy at entry avg → price needs to return exactly to entry
+        # Rebuy level: avg ± (mult × TV_at_entry)
+        # Multiplier is configurable per trader — first vs second trader each have their own setting.
+        # Default: first=0.5 (avg ± TV/2), second=0.0 (at avg exactly).
         tv            = self.hedge_tv_at_entry
         avg_remaining = self.futures_entry_price
-        rebuy_mode    = str(self._cfg("rebuy_mode") or "tv_based")
 
-        if rebuy_mode == "at_avg":
-            rebuy_price = round(avg_remaining, 2)
-            rebuy_label = f"at_avg={avg_remaining:.2f}"
-        else:   # tv_based
-            if self.direction == "BULLISH":
-                rebuy_price = round(avg_remaining - 2 * tv, 2)
-            else:
-                rebuy_price = round(avg_remaining + 2 * tv, 2)
-            rebuy_label = f"avg∓2×TV={tv:.2f}"
+        if self._entered_as_second_trader:
+            mult = float(self._cfg("second_trader_rebuy_tv_mult") if self._cfg("second_trader_rebuy_tv_mult") is not None else 0.0)
+        else:
+            mult = float(self._cfg("first_trader_rebuy_tv_mult") if self._cfg("first_trader_rebuy_tv_mult") is not None else 0.5)
+
+        offset = round(tv * mult, 2)
+        if self.direction == "BULLISH":
+            rebuy_price = round(avg_remaining - offset, 2)
+        else:
+            rebuy_price = round(avg_remaining + offset, 2)
+
+        trader_tag  = "second" if self._entered_as_second_trader else "first"
+        rebuy_label = (f"avg (mult=0, second trader)" if offset == 0
+                       else f"avg∓{mult}×TV={offset:.2f} ({trader_tag} trader)")
 
         self.pending_rebuy_price = rebuy_price
         self.pending_rebuy_qty   = qty_sell
@@ -1464,7 +1423,7 @@ class BaseExecutor:
             "rebuy_qty":   qty_sell,
             "entry_avg":   round(avg_remaining, 2),
             "tv":          round(tv, 2),
-            "mode":        rebuy_mode,
+            "mode":        rebuy_label,
         })
         self._recalc_price_levels()
 
@@ -1507,10 +1466,9 @@ class BaseExecutor:
             await store.log_trade(self.name, "FULL_CLOSE_FUTURES", "BTCUSDT", side,
                                   qty, fp, pnl, "FILLED", {}, self.is_paper)
             from backend.utils import ist_now_str as _isn, utc_now as _utn
-            _sid_fc = self.execution_time_ist.replace(" ", "_").replace(":", "-") if self.execution_time_ist else ""
             await store.save_paper_trade(
                 self.name, "FULL_CLOSE_FUTURES", "BTCUSDT", side, qty, fp, pnl,
-                session_id=_sid_fc,
+                session_id=self._active_session_id,
                 notes=f"session target hit | entry={self.futures_entry_price:.2f}",
                 ts_ist=_isn(), ts_utc=_utn())
 
@@ -1521,8 +1479,13 @@ class BaseExecutor:
         self.partial_done          = False
         self.partial_trigger_price = 0.0
         self.full_close_price      = 0.0
+        # Block re-entry for the rest of this session — TP ends the session
+        _exp_h2 = int(getattr(cfg, "session_expiry_h", 13))
+        _exp_m2 = int(getattr(cfg, "session_expiry_m", 30))
+        self._eligibility_date = get_session_day(ist_now(), _exp_h2, _exp_m2)
+        self.eligible_today    = False
         self.state = ExState.SLEEP
-        await self._log("Futures closed (session target). Option held for squareoff.")
+        await self._log("Futures closed (session TP). Option held for squareoff. No re-entry this session.")
         _bal_tp = round(self._paper.balance, 2) if self._paper else None
         await self._log_session_event("tp_hit",
             f"futures_pnl={self.session_realized_futures_pnl:+.2f} "
@@ -1746,6 +1709,7 @@ class BaseExecutor:
             await store.save_paper_trade(
                 self.name, "HEDGE_SELL", self.hedge_symbol, "SELL",
                 self.hedge_qty, fp, pnl,
+                session_id=self._active_session_id,
                 notes=f"hedge sold after futures TP | entry={self.hedge_fill_price:.2f}",
                 ts_ist=_isn(), ts_utc=_utn())
 
@@ -1753,12 +1717,12 @@ class BaseExecutor:
 
     async def _publish_monitor(self, price: float, in_window: bool, *,
                                 itm: dict = None, prem_ok=None, tv_ok=None,
-                                spread_ok=None, prox_ok=None, hedge_valid=False,
-                                dist_from_line=None, loop_iter=0):
+                                spread_ok=None, clash_ok=None, hedge_valid=False,
+                                loop_iter=0,
+                                active_role: str = "",
+                                active_max_premium: float = 0.0,
+                                active_max_tv: float = 0.0):
         """Publish EXECUTOR_MONITOR every tick for the frontend."""
-        H = self.high_line
-        L = self.low_line
-
         # Always compute nearest ITM so the panel shows it in every state
         if itm is None and price:
             try:
@@ -1766,14 +1730,16 @@ class BaseExecutor:
                 raw = (get_nearest_itm_put(price) if self._option_side == "P"
                        else get_nearest_itm_call(price))
                 if raw:
-                    # Recompute intrinsic using futures price (chain uses spot)
-                    intr = max(raw["strike"] - price, 0) if self._option_side == "P" \
-                           else max(price - raw["strike"], 0)
-                    tv   = max((raw.get("ask") or 0) - intr, 0)
-                    sprd = (abs((raw.get("ask") or 0) - (raw.get("mark") or 0))
-                            / (raw.get("mark") or 1)) * 100
-                    itm  = {**raw, "intrinsic": round(intr, 2),
-                            "time_value": round(tv, 2), "spread_pct": round(sprd, 2)}
+                    intr  = max(raw["strike"] - price, 0) if self._option_side == "P" \
+                            else max(price - raw["strike"], 0)
+                    _ask  = float(raw.get("ask")  or 0)
+                    _mark = float(raw.get("mark") or 0)
+                    # max(mark, ask): when mark=0 (stale REST) use ask; when mark>ask use mark
+                    prem  = max(_mark, _ask) if (_mark > 0 or _ask > 0) else 0.0
+                    tv    = max(prem - intr, 0)
+                    sprd  = (abs(_ask - _mark) / _mark * 100) if _mark > 0 else 0.0
+                    itm   = {**raw, "intrinsic": round(intr, 2),
+                             "time_value": round(tv, 2), "spread_pct": round(sprd, 2)}
             except Exception:
                 pass
 
@@ -1789,41 +1755,31 @@ class BaseExecutor:
                 fut_pnl = self._futures_unrealized_pnl(price, self.futures_remaining_qty)
 
         mon = {
-            "executor":        self.name,
-            "direction":       self.direction,
-            "state":           self.state.value,
-            "is_analyzing":    self._is_analyzing,
-            "price":           price,
-            "high_line":       H,
-            "low_line":        L,
-            "locked_high_line": self.locked_high_line,
-            "locked_low_line":  self.locked_low_line,
-            "in_window":       in_window,
-            "ts_ist":          ist_now_str(),
-            # OB wait-mode transparency
-            "ob_wait_active":  self._ob_wait_active,
-            "ob_wait_since":   self._ob_wait_since,
-            "ob_wait_reason":  self._ob_wait_reason,
-            # Eligibility / trigger / zone
-            "eligible":        self.eligible_today,
-            "entry_zone":      self.entry_zone,
-            "zone_price_snap": self.zone_price_snap,
-            "trigger_type":    self.trigger_type,
-            "triggered":       self.triggered,
-            "trigger_line":    self.trigger_line if self.triggered else None,
-            # Hedge validation loop
-            "nearest_itm":     itm,
-            "prem_ok":         prem_ok,
-            "tv_ok":           tv_ok,
-            "spread_ok":       spread_ok,
-            "prox_ok":         prox_ok,
-            "hedge_valid":     hedge_valid,
-            "dist_from_line":  dist_from_line,
-            "loop_iter":       loop_iter,
-            "far_check":       self._far_check,
+            "executor":    self.name,
+            "direction":   self.direction,
+            "state":       self.state.value,
+            "price":       price,
+            "in_window":   in_window,
+            "ts_ist":      ist_now_str(),
+            # Verify loop conditions
+            "nearest_itm": itm,
+            "prem_ok":     prem_ok,
+            "tv_ok":       tv_ok,
+            "spread_ok":   spread_ok,
+            "clash_ok":    clash_ok,
+            "hedge_valid": hedge_valid,
+            "loop_iter":   loop_iter,
+            # Entry info
+            "triggered":   self.triggered,
+            "trigger_type": self.trigger_type,
+            "entry_zone":  self.entry_zone,
             # Position PnL (while in position)
             "futures_unrealized_pnl": round(fut_pnl, 2),
             "hedge_unrealized_pnl":   round(hedge_pnl, 2),
+            # Trader role (first vs second) and the limits actually being applied
+            "active_role":        active_role,
+            "active_max_premium": active_max_premium,
+            "active_max_tv":      active_max_tv,
         }
         await bus.publish(EXECUTOR_MONITOR, mon, source=self.name)
 
@@ -1840,32 +1796,17 @@ class BaseExecutor:
             hedge_pnl = (cur_val - self.hedge_fill_price) * self.hedge_qty
 
         await bus.publish(POSITION_UPDATE, {
-            "executor":                 self.name,
-            "direction":                self.direction,
-            "state":                    self.state.value,
-            "is_analyzing":             self._is_analyzing,
-            "mark_price":               price,
-            "high_line":                self.high_line,
-            "low_line":                 self.low_line,
-            "locked_high_line":         self.locked_high_line,
-            "locked_low_line":          self.locked_low_line,
-            "in_window":                self.force_window or self._in_window(),
-            # OB wait-mode transparency
-            "ob_wait_active":           self._ob_wait_active,
-            "ob_wait_since":            self._ob_wait_since,
-            "ob_wait_reason":           self._ob_wait_reason,
-            "active_ob_tf":             self._active_ob_tf,
-            "session_obs_summary":      {
-                tf: bool(self._session_obs.get(tf, {}).get(
-                    "demand" if self.direction == "BULLISH" else "supply"))
-                for tf in _OB_TFS
-            },
-            "eligible":                 self.eligible_today,
-            "trigger_type":             self.trigger_type,
-            "triggered":                self.triggered,
-            "trigger_time":             self.trigger_time,
-            "trigger_line":             self.trigger_line,
-            # Hedge position (full details for panel display)
+            "executor":          self.name,
+            "direction":         self.direction,
+            "state":             self.state.value,
+            "mark_price":        price,
+            "in_window":         self.force_window or self._in_window(),
+            # Entry state
+            "triggered":         self.triggered,
+            "trigger_type":      self.trigger_type,
+            "trigger_time":      self.trigger_time,
+            "entry_zone":        self.entry_zone,
+            # Hedge position
             "option_symbol":            self.hedge_symbol,
             "hedge_fill_price":         self.hedge_fill_price,
             "hedge_qty":                self.hedge_qty,
@@ -1877,30 +1818,20 @@ class BaseExecutor:
             "futures_qty":              self.futures_qty,
             "futures_remaining_qty":    self.futures_remaining_qty,
             # Live mark-to-market PnL (both legs)
-            "futures_unrealized_pnl":          round(fut_pnl, 2),
-            "hedge_unrealized_pnl":            round(hedge_pnl, 2),
-            # Order price levels (for panel display)
-            "partial_trigger_price":           self.partial_trigger_price,
-            "full_close_price":                self.full_close_price,
-
-            "pending_rebuy_price":             self.pending_rebuy_price,
-            "pending_rebuy_qty":               self.pending_rebuy_qty,
-            # Position timing & zone
+            "futures_unrealized_pnl":   round(fut_pnl, 2),
+            "hedge_unrealized_pnl":     round(hedge_pnl, 2),
+            # Price levels
+            "partial_trigger_price":    self.partial_trigger_price,
+            "full_close_price":         self.full_close_price,
+            "pending_rebuy_price":      self.pending_rebuy_price,
+            "pending_rebuy_qty":        self.pending_rebuy_qty,
+            # Session info
             "execution_time_ist":       self.execution_time_ist,
             "active_session_id":        self._active_session_id,
-            "entry_zone":               self.entry_zone,
-            "zone_price_snap":          self.zone_price_snap,
-            # Full analysis report for "Check Details" panel
-            "analysis_report":          self.analysis_report,
-            # Session realized PnL (persists after partial booking for display)
             "session_realized_futures_pnl": round(self.session_realized_futures_pnl, 2),
             "session_realized_hedge_pnl":   round(self.session_realized_hedge_pnl,   2),
-            # Management
             "partial_done":             self.partial_done,
-            # Trigger history (last 20, newest first)
-            "trigger_history":          list(reversed(
-                store.get(f"{self.name}_triggers", [])[-20:]
-            )),
+            "is_second_trader":         self._entered_as_second_trader,
             "ts_ist":                   ist_now_str(),
         }, source=self.name)
 
@@ -1908,14 +1839,16 @@ class BaseExecutor:
 
     def _hedge_current_value(self, btc_price: float) -> float:
         """
-        Returns the best available current value of the open hedge option.
+        Returns the fair current value of the open hedge option for PnL purposes.
+
+        Uses mark price (exchange mid-point), NOT ask — ask reflects what you'd pay
+        to BUY more, not what the position is worth right now.  Ask is only used as a
+        last-resort fallback when mark is unavailable.
 
         Intrinsic is ALWAYS recomputed from the live BTC mark price — never trusted
-        from the options chain's stored 'intrinsic' field, which can be stale or
-        computed against a zero price during WebSocket gaps (producing strike-sized
-        errors like max(62500-0,0)=62500 instead of max(62500-62611,0)=0).
+        from the options chain's stored 'intrinsic' field, which can be stale.
 
-        Priority: exchange mark → exchange bid → computed intrinsic → 0
+        Priority: exchange mark → exchange bid → computed intrinsic → ask (fallback)
         """
         if not self.hedge_symbol:
             return 0.0
@@ -1924,6 +1857,7 @@ class BaseExecutor:
             opt  = get_chain().get(self.hedge_symbol, {})
             mark = float(opt.get("mark", 0) or 0)
             bid  = float(opt.get("bid",  0) or 0)
+            ask  = float(opt.get("ask",  0) or 0)
             # Recompute intrinsic from current verified BTC price
             parts  = self.hedge_symbol.split("-")   # BTC-YYMMDD-STRIKE-C/P
             strike = float(parts[2]) if len(parts) >= 4 else 0.0
@@ -1934,7 +1868,18 @@ class BaseExecutor:
                     intr = max(btc_price - strike, 0.0)
             else:
                 intr = 0.0
-            return mark if mark > 0 else (bid if bid > 0 else intr)
+            # Mark = fair value for PnL.  Bid = what you'd actually receive on exit.
+            # Ask is last resort only (e.g. brand-new listing with no trades yet).
+            # Floor at intrinsic: deep ITM option always worth at least its exercise value.
+            if mark > 0:
+                live = mark
+            elif bid > 0:
+                live = bid
+            elif ask > 0:
+                live = ask
+            else:
+                live = 0.0
+            return max(live, intr)
         except Exception:
             return 0.0
 
@@ -2260,6 +2205,7 @@ class BaseExecutor:
         await store.save_paper_trade(
             self.name, "PARTIAL_REBUY", "BTCUSDT",
             self._futures_side, rbx_qty, crossed_at, 0.0,
+            session_id=self._active_session_id,
             notes=f"Offline fill detected on reconnect — candle ts={ts_ms}"
         )
         await self._save_state()
@@ -2429,8 +2375,8 @@ class BaseExecutor:
         """
         Pre-compute exact futures price levels for display.
         Triggered after every position change (execute, partial sell, rebuy fill).
-          partial_trigger_price = price where fut_pnl = premium × partial_ratio
-          full_close_price      = price where remaining fut_pnl = session_target - realized
+          partial_trigger_price = entry + premium_paid/qty  (futures profit covers full option cost)
+          full_close_price      ≈ price where combined PnL = session_target - already_realized
         """
         E = self.futures_entry_price
         Q = self.futures_remaining_qty or self.futures_qty or 1
@@ -2439,17 +2385,51 @@ class BaseExecutor:
             self.full_close_price      = 0.0
             return
 
-        pnl_partial   = self.hedge_premium_paid * (self._cfg("partial_profit_ratio") or 1.1)
-        session_tgt   = (self._cfg("session_pnl_target")
-                         or self._cfg("full_close_target") or 600.0)
+        # Partial trigger: price at which futures profit = total premium paid
+        # premium_paid / qty = fill_price per contract
+        pnl_partial   = self.hedge_premium_paid   # target futures PnL = full premium
+        session_tgt   = float(self._cfg("session_pnl_target")
+                              or self._cfg("full_close_target") or 600.0)
         remaining_pnl = session_tgt - self.session_realized_futures_pnl
 
         if self.direction == "BULLISH":
-            self.partial_trigger_price = round(E + pnl_partial    / Q, 2)
-            self.full_close_price      = round(E + remaining_pnl  / Q, 2)
+            self.partial_trigger_price = round(E + pnl_partial   / Q, 2)
+            self.full_close_price      = round(E + remaining_pnl / Q, 2)
         else:
-            self.partial_trigger_price = round(E - pnl_partial    / Q, 2)
-            self.full_close_price      = round(E - remaining_pnl  / Q, 2)
+            self.partial_trigger_price = round(E - pnl_partial   / Q, 2)
+            self.full_close_price      = round(E - remaining_pnl / Q, 2)
+
+    def _get_other_executor(self) -> Optional['BaseExecutor']:
+        """Return the peer directional executor (bull→bear or bear→bull). None if not found."""
+        for ex in BaseExecutor._EXECUTOR_REGISTRY.values():
+            if ex is not self and ex.direction in ("BULLISH", "BEARISH") and ex.direction != self.direction:
+                return ex
+        return None
+
+    def _parse_strike(self, symbol: str) -> Optional[float]:
+        """Parse strike from Binance option symbol format: BTC-YYMMDD-STRIKE-C/P."""
+        try:
+            parts = symbol.split("-")
+            return float(parts[2]) if len(parts) >= 4 else None
+        except (ValueError, IndexError):
+            return None
+
+    async def _fetch_ob_background(self):
+        """Fetch OB zones in the background at window open — for panel display only."""
+        self._is_analyzing = True
+        try:
+            await self._run_ob_analysis()
+            if self._session_obs:
+                zone_type = "demand" if self.direction == "BULLISH" else "supply"
+                zones_found = [tf for tf in _OB_TFS if self._session_obs.get(tf, {}).get(zone_type)]
+                self.log.info(
+                    f"[{self.name}] OB background fetch done — "
+                    f"{len(zones_found)} {zone_type} zone(s) on {zones_found or 'no TF'} (display only)"
+                )
+        except Exception as e:
+            self.log.debug(f"[{self.name}] OB background fetch error: {e}")
+        finally:
+            self._is_analyzing = False
 
     async def _reset_daily(self):
         """Reset trigger/loop state for a new day or same-day retry."""
@@ -2462,7 +2442,7 @@ class BaseExecutor:
         self._verify_start_time  = 0.0
         self._prox_bad_ticks     = 0
         self._verify_last_fail   = ""
-        self._verify_fail_counts = {"prox": 0, "prem": 0, "tv": 0, "spread": 0, "no_itm": 0}
+        self._verify_fail_counts = {"prem": 0, "tv": 0, "spread": 0, "no_itm": 0, "strike_clash": 0}
         self.locked_high_line    = None   # unlock — fresh analysis at next window open
         self.locked_low_line     = None
         self.high_line           = None   # clear display lines too
@@ -2520,8 +2500,9 @@ class BaseExecutor:
         self._peak_unrealized_pnl      = 0.0
         self._trough_unrealized_pnl    = 0.0
         self._verify_last_fail         = ""
-        self._verify_fail_counts       = {"prox": 0, "prem": 0, "tv": 0, "spread": 0, "no_itm": 0}
-        self._last_price_watch_dist    = 0.0   # last logged price-watch distance (dedup)
+        self._verify_fail_counts       = {"prem": 0, "tv": 0, "spread": 0, "no_itm": 0, "strike_clash": 0}
+        self._last_price_watch_dist    = 0.0
+        self._entered_as_second_trader = False
         # Keep session_realized_pnl until daily reset so panel shows final result
 
     async def _save_state(self):
@@ -2571,6 +2552,7 @@ class BaseExecutor:
             "last_ob_candle_ts":               self._last_ob_candle_ts,
             "session_obs":                     self._session_obs,
             "active_ob_tf":                    self._active_ob_tf,
+            "entered_as_second_trader":        self._entered_as_second_trader,
         }
 
     def _restore_state(self, s: dict):
@@ -2634,6 +2616,7 @@ class BaseExecutor:
             self._last_ob_candle_ts           = s.get("last_ob_candle_ts", 0)
             self._session_obs                 = s.get("session_obs", {})
             self._active_ob_tf                = s.get("active_ob_tf", "")
+            self._entered_as_second_trader    = s.get("entered_as_second_trader", False)
             # If restoring mid-verification, reset timer to NOW so timeout is fresh
             if self.state == ExState.VERIFY_HEDGE_LOOP:
                 self._verify_start_time = time.time()

@@ -242,6 +242,19 @@ async def _mark_loop():
             raw, _ = await loop.run_in_executor(_executor, lambda: _http_get_sync(url))
             data = json.loads(raw)
             if isinstance(data, list):
+                # Detect new BTC strikes Binance added since last exchangeInfo fetch.
+                # When spot moves by ~1000 pts, Binance lists new strikes — we need to
+                # pick them up so get_nearest_itm_put/call selects the right one.
+                new_sym_found = any(
+                    m.get("symbol", "").startswith("BTC-") and
+                    m.get("symbol", "").split("-")[-1].upper() in ("C", "P") and
+                    m.get("symbol") not in _sym_meta
+                    for m in data
+                )
+                if new_sym_found:
+                    log.info("New BTC option symbols detected in mark feed — refreshing strike list")
+                    await _fetch_expiry()
+
                 new_cache = {}
                 for m in data:
                     sym = m.get("symbol")
@@ -281,7 +294,11 @@ def _build_depth_msg(data: dict, sym_upper: str) -> None:
 
     mark, iv = _mark_cache.get(sym_upper, (0.0, 0.0))
     intr = _intrinsic(strike, spot, side)
-    prem = ask if ask > 0 else mark
+    # Use max(mark, ask) as effective price:
+    #   - When ask > mark (illiquid, inflated ask): use ask — you'll pay ask to buy
+    #   - When mark > ask (stale/cheap ask): use mark — fairer value
+    #   - When mark = 0 (stale REST cache): fall back to ask
+    prem = max(mark, ask) if (mark > 0 or ask > 0) else 0.0
     tv   = max(prem - intr, 0.0)
 
     _chain[sym_upper] = {
@@ -549,7 +566,8 @@ def get_nearest_itm_put(futures_price: float) -> Optional[dict]:
     intr = max(nearest_strike - futures_price, 0.0)
     ask  = opt.get("ask") or 0.0
     mark = opt.get("mark") or 0.0
-    tv   = max((ask if ask > 0 else mark) - intr, 0.0)
+    prem = max(mark, ask) if (mark > 0 or ask > 0) else 0.0
+    tv   = max(prem - intr, 0.0)
     opt["intrinsic"]  = round(intr, 2)
     opt["time_value"] = round(tv, 2)
     if mark > 0:
@@ -583,7 +601,8 @@ def get_nearest_itm_call(futures_price: float) -> Optional[dict]:
     intr = max(futures_price - nearest_strike, 0.0)
     ask  = opt.get("ask") or 0.0
     mark = opt.get("mark") or 0.0
-    tv   = max((ask if ask > 0 else mark) - intr, 0.0)
+    prem = max(mark, ask) if (mark > 0 or ask > 0) else 0.0
+    tv   = max(prem - intr, 0.0)
     opt["intrinsic"]  = round(intr, 2)
     opt["time_value"] = round(tv, 2)
     if mark > 0:

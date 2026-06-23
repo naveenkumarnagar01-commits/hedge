@@ -3484,7 +3484,6 @@
       if (!_traderInited[key]) {
         _initTraderShell(key, tc);
         _traderInited[key] = true;
-        _initTraderChart(key, tc);
         loadExTrades(key === 'bull' ? 0 : 1);
       }
       _updateTraderLive(key, tc);
@@ -3557,27 +3556,15 @@
             </div>
           </div>
 
-          <!-- Row: Workflow + Chart -->
-          <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;flex-shrink:0">
+          <!-- ── WHAT'S HAPPENING NOW banner ── -->
+          <div id="tc-${key}-next-action" style="background:rgba(6,14,28,.9);border:1px solid var(--b2);border-left:4px solid ${tc.col};border-radius:var(--r-md);padding:10px 14px;flex-shrink:0">
+            <div style="color:var(--t4);font-size:10px">Initialising...</div>
+          </div>
 
-            <!-- Workflow pipeline -->
-            <div class="card" style="padding:6px 8px;overflow:hidden">
-              <div style="font-size:8px;text-transform:uppercase;letter-spacing:.1em;color:${tc.col};margin-bottom:4px;font-weight:bold">Workflow Status</div>
-              <div id="tc-${key}-wf"><!-- populated by updateTraderLive --></div>
-            </div>
-
-            <!-- Mini chart — permanent container, never destroyed -->
-            <div style="background:#131722;border-radius:5px;border:1px solid var(--b1);flex-shrink:0;overflow:hidden;display:flex;flex-direction:column">
-              <!-- Timeframe label bar (same style as Binance) -->
-              <div style="display:flex;align-items:center;justify-content:space-between;padding:3px 8px;background:#1a2540;flex-shrink:0">
-                <span id="tc-${key}-tf-label" style="font-size:9px;font-weight:bold;color:var(--t2);font-family:monospace;letter-spacing:.04em">15M · BTCUSDT Perp</span>
-                <div style="display:flex;gap:3px">
-                  ${['5m','15m','1h','4h'].map(t=>`<button id="tc-${key}-cht-${t}" onclick="_switchTraderChartTF('${key}','${t}')"
-                    style="font-size:8px;padding:1px 6px;border-radius:2px;cursor:pointer;border:1px solid #374151;background:${t==='15m'?'#1e3a5f':'transparent'};color:${t==='15m'?'#93c5fd':'#4b5563'}">${t}</button>`).join('')}
-                </div>
-              </div>
-              <div id="${tc.chartId}" style="width:100%;height:250px;display:block;flex:1"></div>
-            </div>
+          <!-- ── Workflow + Conditions — full width ── -->
+          <div class="card" style="padding:8px 10px;overflow:hidden;flex-shrink:0">
+            <div style="font-size:8px;text-transform:uppercase;letter-spacing:.1em;color:${tc.col};margin-bottom:6px;font-weight:bold">Live Conditions &amp; Order Block Zones</div>
+            <div id="tc-${key}-wf"><!-- populated by updateTraderLive --></div>
           </div>
 
           <!-- Active Position (shown only when in trade) -->
@@ -3871,6 +3858,32 @@ async function _updateSessionBanner() {
       _applyValidationUI(tk, errors);
     }
 
+    // Refreshes the Saved Parameters card cells in-place using the edit buffer + CFG.
+    // Called on every keystroke so the user sees their changes immediately.
+    function _refreshSavedParamsCard(key) {
+      const pfx = key === 'bull' ? 'bull_' : key === 'bear' ? 'bear_' : 'vol_';
+      const edits = _traderCfgEdits[key] || {};
+      const _get  = (k) => { const fk = pfx+k; return edits[fk] !== undefined ? edits[fk] : CFG[fk]; };
+      const _SYS  = { max_premium: 320, max_time_value: 220, contract_qty: 1 };
+      const _disp = (rk, mk, unit) => {
+        const v = parseFloat(_get(rk));
+        if (v > 0) return `${v}${unit}`;
+        return `${_SYS[mk]||'—'}${unit}<span style="font-size:7px;color:#1e3a5f;margin-left:2px">↙sys</span>`;
+      };
+      const _rSuf = v => v===0?'(at avg)':v===0.5?'(TV/2)':'×TV';
+      const _upd  = (id, html) => { const e = document.getElementById(id); if (e) e.innerHTML = html; };
+      _upd(`spc-${key}-1-prem`,  _disp('first_trader_max_premium',      'max_premium',   ''));
+      _upd(`spc-${key}-2-prem`,  _disp('second_trader_max_premium',     'max_premium',   ''));
+      _upd(`spc-${key}-1-tv`,    _disp('first_trader_max_time_value',   'max_time_value',''));
+      _upd(`spc-${key}-2-tv`,    _disp('second_trader_max_time_value',  'max_time_value',''));
+      _upd(`spc-${key}-1-qty`,   _disp('first_trader_contract_qty',     'contract_qty',  ' BTC'));
+      _upd(`spc-${key}-2-qty`,   _disp('second_trader_contract_qty',    'contract_qty',  ' BTC'));
+      const r1 = parseFloat(_get('first_trader_rebuy_tv_mult'));
+      const r2 = parseFloat(_get('second_trader_rebuy_tv_mult'));
+      _upd(`spc-${key}-1-rebuy`, `${isNaN(r1)?0:r1} <span style="font-size:7px;color:#64748b">${_rSuf(isNaN(r1)?0:r1)}</span>`);
+      _upd(`spc-${key}-2-rebuy`, `${isNaN(r2)?0:r2} <span style="font-size:7px;color:#64748b">${_rSuf(isNaN(r2)?0:r2)}</span>`);
+    }
+
     // ── OB Timeframe selector ─────────────────────────────────────────────
     function setTraderTF(key, tf) {
       const tc = TRADER_CFG[key]; if (!tc) return;
@@ -3891,6 +3904,63 @@ async function _updateSessionBanner() {
     function _buildSettingsForm(key, tc) {
       const pfx = tc.pfx;
       const fv = k => CFG[pfx+k] ?? CFG[k] ?? '';
+
+      // ── Saved Parameters summary card ──────────────────────────────────
+      // _effDisp: per-role value display. No fallback to any "main" field —
+      // system hardcoded defaults (320 ask / 220 tv / 1 qty) are the only backstop.
+      const _SYS_DEF = { max_premium: 320, max_time_value: 220, contract_qty: 1 };
+      const _effDisp = (roleKey, mainKey, unit='') => {
+        const roleV = parseFloat(fv(roleKey));
+        if (roleV > 0) return `${roleV}${unit}`;
+        const sysV = _SYS_DEF[mainKey] || 0;
+        return `<span style="color:#60a5fa">${sysV||'—'}${unit}</span><span style="font-size:7px;color:#1e3a5f;margin-left:3px" title="set to 0 — system default">↙sys</span>`;
+      };
+      const _savedSummary = (() => {
+        const startH = parseInt(fv('trade_start_h')||4), startM = parseInt(fv('trade_start_m')||0);
+        const endH   = parseInt(fv('trade_end_h')||18), endM   = parseInt(fv('trade_end_m')||30);
+        const fcH    = parseInt(fv('force_close_h')||18), fcM  = parseInt(fv('force_close_m')||30);
+        const ft2 = (h,m) => `${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}`;
+        const _row = (label, v1html, v2html, rowKey='') => `
+          <tr style="border-bottom:1px solid #050a14">
+            <td style="padding:3px 8px;font-size:9px;color:#64748b">${label}</td>
+            <td id="spc-${key}-1-${rowKey}" style="padding:3px 8px;font-size:9px;font-family:monospace;color:#60a5fa;text-align:right">${v1html}</td>
+            <td id="spc-${key}-2-${rowKey}" style="padding:3px 8px;font-size:9px;font-family:monospace;color:#a78bfa;text-align:right">${v2html}</td>
+          </tr>`;
+        // Rebuy mult: 0 is a valid explicit value (means "rebuy at avg exactly"), not a fallback
+        const _rebuySuffix = v => `<span style="font-size:7px;color:#64748b;margin-left:2px">${v==0?'(at avg)':v==0.5?'(TV/2)':'×TV'}</span>`;
+        const _rebuyDisp = (roleKey) => {
+          const v = parseFloat(fv(roleKey));
+          return `${isNaN(v)?0:v}${_rebuySuffix(isNaN(v)?0:v)}`;
+        };
+        return `<div style="background:#050a14;border:1px solid #1e3a5f;border-radius:var(--r-sm);padding:8px;margin-bottom:10px">
+          <div style="font-size:8px;color:#22d3ee;text-transform:uppercase;letter-spacing:.1em;font-weight:bold;margin-bottom:6px">
+            ✓ Saved Parameters — Currently Active
+          </div>
+          <div style="font-size:9px;color:#6b7280;margin-bottom:5px;display:flex;gap:16px">
+            <span>Window: <b style="color:#e5e7eb">${ft2(startH,startM)}–${ft2(endH,endM)} IST</b></span>
+            <span>Squareoff: <b style="color:#f87171">${ft2(fcH,fcM)} IST</b></span>
+            <span>Session Target: <b style="color:#4ade80">$${fv('session_pnl_target')||600}</b></span>
+            <span>Spread Max: <b style="color:#f59e0b">${fv('price_diff_percent')||5}%</b></span>
+          </div>
+          <table style="width:100%;border-collapse:collapse;background:#030712;border-radius:4px;overflow:hidden">
+            <thead><tr style="background:#0c1a2e">
+              <th style="padding:3px 8px;font-size:7px;color:var(--t4);text-align:left;font-weight:normal;text-transform:uppercase">Parameter</th>
+              <th style="padding:3px 8px;font-size:7px;color:#60a5fa;text-align:right;font-weight:bold">① 1st Trader</th>
+              <th style="padding:3px 8px;font-size:7px;color:#a78bfa;text-align:right;font-weight:bold">② 2nd Trader</th>
+            </tr></thead>
+            <tbody>
+              ${_row('Max Ask ($)',        _effDisp('first_trader_max_premium','max_premium',''), _effDisp('second_trader_max_premium','max_premium',''), 'prem')}
+              ${_row('Max Time Value ($)', _effDisp('first_trader_max_time_value','max_time_value',''), _effDisp('second_trader_max_time_value','max_time_value',''), 'tv')}
+              ${_row('Trade Size',         _effDisp('first_trader_contract_qty','contract_qty',' BTC'), _effDisp('second_trader_contract_qty','contract_qty',' BTC'), 'qty')}
+              ${_row('Rebuy mult × TV',    _rebuyDisp('first_trader_rebuy_tv_mult'), _rebuyDisp('second_trader_rebuy_tv_mult'), 'rebuy')}
+            </tbody>
+          </table>
+          <div style="font-size:7.5px;color:#334155;margin-top:4px;padding:0 2px">
+            1st Trader = no peer position · 2nd Trader = peer already in position · <span style="color:#1e3a5f">↙main</span> = 0 set, using main default
+          </div>
+        </div>`;
+      })();
+
       const inp = (k,l,step,min,max,note='') =>
         `<div><div style="font-size:8px;color:#64748b;margin-bottom:2px">${l}</div>
          <input type="number" class="inp inp-sm" data-tk="${key}" data-k="${pfx+k}"
@@ -3917,47 +3987,50 @@ async function _updateSessionBanner() {
           <input type="hidden" class="inp inp-sm" data-tk="${key}" data-k="${fullMKey}" value="${m}" oninput="_tsCfgChange(this)">
         </div>`;
       };
-      // Per-TF OB settings grid
-      const obTFGrid = ['5m','15m','1h','4h'].map(tf => {
-        const tolKey  = pfx + 'ob_' + tf + '_tolerance';
-        const premKey = pfx + 'ob_' + tf + '_max_premium';
-        const tvKey   = pfx + 'ob_' + tf + '_max_time_value';
-        const qtyKey  = pfx + 'ob_' + tf + '_qty';
-        const mk = (k,step,min,max,title) =>
-          `<input type="number" class="inp inp-sm" data-tk="${key}" data-k="${k}"
-             value="${CFG[k]??''}" step="${step}" min="${min}" max="${max}"
-             oninput="_tsCfgChange(this)" title="${title}" style="width:100%">`;
-        return `<tr>
-          <td style="padding:4px 6px;color:${tc.col};font-size:10px;font-weight:bold">${tf.toUpperCase()}</td>
-          <td style="padding:4px 6px">${mk(tolKey,  5,   5, 2000, '±pts from zone mid to enter')}</td>
-          <td style="padding:4px 6px">${mk(premKey, 10,  10, 2000, 'Max option ask ($)')}</td>
-          <td style="padding:4px 6px">${mk(tvKey,   5,   0, 1000, 'Max time value (ask−intrinsic) ($)')}</td>
-          <td style="padding:4px 6px">${mk(qtyKey,  0.01,0.01,10,'BTC qty for futures + hedge')}</td>
-        </tr>`;
-      }).join('');
-      return `<div style="margin-bottom:10px">
-        <div style="font-size:8px;color:#64748b;margin-bottom:5px;text-transform:uppercase;letter-spacing:.06em">
-          Order Block — Per-TF Settings · smallest TF wins when price in multiple zones
-        </div>
-        <table style="width:100%;border-collapse:collapse;font-size:9px">
-          <thead><tr style="color:var(--t3)">
-            <th style="padding:2px 6px;text-align:left">TF</th>
-            <th style="padding:2px 6px;text-align:left">Tolerance (±pts)</th>
-            <th style="padding:2px 6px;text-align:left">Max Ask ($)</th>
-            <th style="padding:2px 6px;text-align:left">Max TV ($)</th>
-            <th style="padding:2px 6px;text-align:left">Qty (BTC)</th>
-          </tr></thead>
-          <tbody>${obTFGrid}</tbody>
-        </table>
-      </div>
-      <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px">
+      return _savedSummary +
+      `<div style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:8px">
         ${time('Window Open',  'trade_start_h','trade_start_m',  4, 0)}
         ${time('Window Close', 'trade_end_h',  'trade_end_m',   18,30)}
         ${time('Squareoff',    'force_close_h','force_close_m', 18,30)}
-        ${key === 'vol' ? inp('max_time_value', 'Max Time Value ($)', 5, 0, 1000, 'TV = ask − intrinsic. Must be ≤ this') : ''}
-        ${inp('price_diff_percent',    'Max Spread (%)',     .5,  0,   50,   '|ask−mark|/mark × 100 must be ≤ this (global)')}
-        ${inp('partial_profit_ratio',  'Partial Ratio',     .01, .01, 10,   'Trigger 50% sell when fut_pnl ≥ premium × this')}
-        ${inp('session_pnl_target',    'Session Target ($)',  10, 10,  1e5,  'Close all futures when cumulative futures PnL ≥ this')}
+      </div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:8px">
+        ${inp('price_diff_percent', 'Max Spread (%)',     .5,  0,  50,  '|ask−mark|/mark × 100 must be ≤ this')}
+        ${inp('session_pnl_target', 'Session Target ($)', 10, 10, 1e5,  'Close futures when total PnL ≥ this')}
+      </div>
+      <div style="background:#050a14;border:1px solid #0f172a;border-radius:var(--r-sm);padding:8px;margin-bottom:6px">
+        <div style="font-size:8px;color:#64748b;text-transform:uppercase;letter-spacing:.06em;margin-bottom:6px">
+          Per-Role Trading Parameters
+          <span style="color:#334155;font-style:normal;text-transform:none;letter-spacing:0"> · ① First = no peer position · ② Second = peer already in position · 0 = system default (ask:320 tv:220 qty:1)</span>
+        </div>
+        <table style="width:100%;border-collapse:collapse;font-size:9px">
+          <thead><tr style="background:#090e1a;color:var(--t4);font-size:7px;text-transform:uppercase">
+            <th style="padding:3px 6px;text-align:left">Parameter</th>
+            <th style="padding:3px 6px;text-align:center">① First Trader</th>
+            <th style="padding:3px 6px;text-align:center">② Second Trader</th>
+          </tr></thead>
+          <tbody>
+            <tr style="border-bottom:1px solid #0a0f1a">
+              <td style="padding:4px 6px;color:var(--t3)">Max Ask ($) <span style="color:#334155;font-size:8px">(0 = sys default 320)</span></td>
+              <td style="padding:4px 6px"><input type="number" class="inp inp-sm" style="width:100%" data-tk="${key}" data-k="${pfx}first_trader_max_premium"  value="${fv('first_trader_max_premium')}"  step="10" min="0" max="10000" oninput="_tsCfgChange(this)"></td>
+              <td style="padding:4px 6px"><input type="number" class="inp inp-sm" style="width:100%" data-tk="${key}" data-k="${pfx}second_trader_max_premium" value="${fv('second_trader_max_premium')}" step="10" min="0" max="10000" oninput="_tsCfgChange(this)"></td>
+            </tr>
+            <tr style="border-bottom:1px solid #0a0f1a">
+              <td style="padding:4px 6px;color:var(--t3)">Max TV ($) <span style="color:#334155;font-size:8px">(0 = sys default 220)</span></td>
+              <td style="padding:4px 6px"><input type="number" class="inp inp-sm" style="width:100%" data-tk="${key}" data-k="${pfx}first_trader_max_time_value"  value="${fv('first_trader_max_time_value')}"  step="5" min="0" max="1000" oninput="_tsCfgChange(this)"></td>
+              <td style="padding:4px 6px"><input type="number" class="inp inp-sm" style="width:100%" data-tk="${key}" data-k="${pfx}second_trader_max_time_value" value="${fv('second_trader_max_time_value')}" step="5" min="0" max="1000" oninput="_tsCfgChange(this)"></td>
+            </tr>
+            <tr style="border-bottom:1px solid #0a0f1a">
+              <td style="padding:4px 6px;color:var(--t3)">Trade Size (BTC) <span style="color:#334155;font-size:8px">(0 = sys default 1)</span></td>
+              <td style="padding:4px 6px"><input type="number" class="inp inp-sm" style="width:100%" data-tk="${key}" data-k="${pfx}first_trader_contract_qty"  value="${fv('first_trader_contract_qty')}"  step="0.01" min="0" max="1000" oninput="_tsCfgChange(this)"></td>
+              <td style="padding:4px 6px"><input type="number" class="inp inp-sm" style="width:100%" data-tk="${key}" data-k="${pfx}second_trader_contract_qty" value="${fv('second_trader_contract_qty')}" step="0.01" min="0" max="1000" oninput="_tsCfgChange(this)"></td>
+            </tr>
+            <tr>
+              <td style="padding:4px 6px;color:var(--t3)">Rebuy mult × TV <span style="color:#334155;font-size:8px">(0=at avg · 0.5=TV/2 · 1=TV · 2=2×TV)</span></td>
+              <td style="padding:4px 6px"><input type="number" class="inp inp-sm" style="width:100%" data-tk="${key}" data-k="${pfx}first_trader_rebuy_tv_mult"  value="${fv('first_trader_rebuy_tv_mult')}"  step="0.1" min="0" max="5" oninput="_tsCfgChange(this)" title="Rebuy at avg ± (this × TV). 0.5 = avg ± TV/2"></td>
+              <td style="padding:4px 6px"><input type="number" class="inp inp-sm" style="width:100%" data-tk="${key}" data-k="${pfx}second_trader_rebuy_tv_mult" value="${fv('second_trader_rebuy_tv_mult')}" step="0.1" min="0" max="5" oninput="_tsCfgChange(this)" title="Rebuy at avg ± (this × TV). 0 = at avg exactly"></td>
+            </tr>
+          </tbody>
+        </table>
       </div>
       <div id="tc-${key}-cfg-errors" style="display:none;background:#0a0614;border:1px solid #374151;border-radius:var(--r-sm);padding:7px 10px;margin-top:8px"></div>
       ${key !== 'vol' ? `
@@ -4452,11 +4525,16 @@ async function _updateSessionBanner() {
         Object.assign(CFG, edits);
         _traderCfgEdits[key] = {};
         const btn = el('tc-' + key + '-save-btn'); if (btn) btn.disabled = true;
-        // Force-re-render the header line row immediately so new times show without
-        // waiting for the next WebSocket tick (can be up to 15s in SLEEP state)
+        // Clear stale per-role limits from last EXECUTOR_MONITOR tick.
+        // Without this, badge reads mon.active_max_premium (old backend value)
+        // instead of the freshly saved CFG value.
+        const _mon = S.monitors[key];
+        if (_mon) { _mon.active_max_premium = 0; _mon.active_max_tv = 0; _mon.active_role = ''; }
+        _refreshSavedParamsCard(key);
         if (_traderInited[key]) _updateTraderLive(key, TRADER_CFG[key]);
         fetch('/api/config').then(r => r.json()).then(c => {
           Object.assign(CFG, c);
+          _refreshSavedParamsCard(key);
           if (_traderInited[key]) _updateTraderLive(key, TRADER_CFG[key]);
         });
         // TF change → reset today's analysis so next window open re-runs on new TF
@@ -4688,6 +4766,8 @@ async function _updateSessionBanner() {
       const session = CFG[pfx+'session_pnl_target']||CFG[pfx+'full_close_target']||600;
       const realized= pos.session_realized_futures_pnl||0;
       const remaining=Math.max(session-realized,0);
+      // futures leg closed but option still held waiting for squareoff
+      const futClosed = (pos.futures_remaining_qty||0) < 0.0001 && (pos.hedge_premium_paid||0) > 0;
       const _wfCd   = _sessionCountdown(startH, startM, endH, endM, forceH, forceM);
 
       // ── Per-TF live condition analysis ────────────────────────────────
@@ -4772,6 +4852,68 @@ async function _updateSessionBanner() {
         ${_hasObs ? `<div style="font-size:8px;color:var(--t4);margin-top:2px;padding:0 2px">Tol: ${_OB_TFS_D.map(t=>`${t.toUpperCase()}:±${CFG[pfx+'ob_'+t+'_tolerance']||100}pts`).join(' · ')} · Qty: ${_OB_TFS_D.map(t=>`${t.toUpperCase()}:${CFG[pfx+'ob_'+t+'_qty']||1}BTC`).join(' · ')}</div>` : ''}
       </div>`;
 
+      // ── Next Action Banner ─────────────────────────────────────────────
+      const _naEl = el(`tc-${key}-next-action`);
+      if (_naEl) {
+        let _naIcon, _naText, _naColor, _naSub;
+        if (isAnalyzing) {
+          _naIcon='⟳'; _naText='Running S/R Analysis'; _naColor='#60a5fa';
+          _naSub='Computing Order Block zones from candle history — please wait';
+        } else if (futClosed) {
+          _naIcon='⏳'; _naText=`Futures closed — ${key==='bull'?'PUT':'CALL'} held for squareoff`; _naColor='#22d3ee';
+          _naSub=`${pos.option_symbol||'Option'} will be sold at squareoff ${ft(forceH,forceM)} IST · Futures realized: ${realized>=0?'+':''}$${fmt(realized,2)} · Option PnL: ${hedgePnL>=0?'+':''}$${fmt(hedgePnL,2)}`;
+        } else if (state==='SLEEP' && !inWin) {
+          _naIcon='⏰'; _naText=`Trading window opens at ${ft(startH,startM)} IST`; _naColor='#4b5563';
+          _naSub=`Squareoff at ${ft(forceH,forceM)} IST · Bot is sleeping until then`;
+        } else if (state==='SLEEP' && inWin) {
+          _naIcon='🔍'; _naText='Scanning for Order Block zones'; _naColor='#f59e0b';
+          _naSub='Watching 5m · 15m · 1h · 4h — no eligible zone found yet';
+        } else if (pos.ob_wait_active) {
+          _naIcon='👁'; _naText='OB Watch Active — Zone formed during window'; _naColor='#f59e0b';
+          _naSub=`Waiting for price to re-test zone · since ${(pos.ob_wait_since||'').substring(11,16)||'—'} IST`;
+        } else if ((state==='WAIT_TRIGGER'||state==='CHECK_ELIGIBILITY') && target) {
+          _naIcon='📍'; _naText=`Waiting for BTC to reach $${fmt(target,0)}`; _naColor='#f59e0b';
+          _naSub=dist!=null?`${fmt(dist,0)} pts away from ${key==='bull'?'demand':'supply'} zone${activeTF?' · '+activeTF.toUpperCase()+' zone active':''}` : 'Monitoring price...';
+        } else if (state==='VERIFY_HEDGE_LOOP') {
+          _naIcon='⚡'; _naText=`Price in ${key==='bull'?'Demand':'Supply'} Zone — Verifying Option`; _naColor=tc.col;
+          _naSub=`Checking ITM ${key==='bull'?'PUT':'CALL'}: Ask ≤ $${fmt(maxPrem,0)} · TV ≤ $${fmt(maxTV,0)} · Spread ≤ ${maxSprd}%${allOk?' — ALL PASS, EXECUTING':''}`;
+        } else if (state==='EXECUTE'||state==='ENTERING_OPTION') {
+          _naIcon='🟡'; _naText='Placing Orders — Entry Executing'; _naColor='#f59e0b';
+          _naSub=key==='bull'?'Entering LONG futures + ITM PUT hedge':'Entering SHORT futures + ITM CALL hedge';
+        } else if (state==='MANAGING_POSITION') {
+          const _fE=pos.futures_entry||0, _rQ=pos.futures_remaining_qty||pos.futures_qty||1;
+          const _tvE=pos.hedge_time_value_at_entry||0, _isSec2=!!(pos.is_second_trader);
+          const _rbCalc=_isSec2?_fE:(key==='bull'?_fE-_tvE/2:_fE+_tvE/2);
+          const _rbPrice=pos.pending_rebuy_price||0;
+          _naIcon='🟢'; _naText=`${key==='bull'?'LONG ▲':'SHORT ▼'} ${_rQ}BTC @ $${fmt(_fE,0)} — In Position`; _naColor='#4ade80';
+          if (!pos.partial_done) {
+            _naSub=`PnL: ${totPnL>=0?'+':''}$${fmt(totPnL,2)} · Next: Partial TP @ $${fmt(pos.partial_trigger_price||0,0)} → then Rebuy @ ≈$${fmt(_rbCalc,0)}`;
+          } else if (_rbPrice>0) {
+            _naSub=`PnL: ${totPnL>=0?'+':''}$${fmt(totPnL,2)} · Partial done ✓ · Rebuy PENDING @ $${fmt(_rbPrice,0)} → then Full TP`;
+          } else {
+            _naSub=`PnL: ${totPnL>=0?'+':''}$${fmt(totPnL,2)} · Partial + Rebuy done ✓ · Watching Full TP @ $${fmt(pos.full_close_price||0,0)}`;
+          }
+        } else if (state==='PARTIAL_BOOKING') {
+          _naIcon='🟣'; _naText='Partial Profit Booked — Watching for Full Target'; _naColor='#a78bfa';
+          _naSub=`Remaining: ${pos.futures_remaining_qty||'?'}BTC · Full close @ $${fmt(pos.full_close_price||0,0)}`;
+        } else if (state==='FORCE_CLOSE'||state==='SQUARING_OFF') {
+          _naIcon='🔴'; _naText='Closing All Positions — Session Time Limit'; _naColor='#f87171';
+          _naSub='Squaring off futures and hedge option now';
+        } else if (state==='DONE') {
+          _naIcon='✓'; _naText='Session Complete — All Positions Closed'; _naColor='#4ade80';
+          _naSub=`Session PnL: ${realized>=0?'+':''}$${fmt(realized,2)}`;
+        } else {
+          _naIcon='○'; _naText=state.replace(/_/g,' '); _naColor='#64748b'; _naSub='';
+        }
+        _naEl.innerHTML=`<div style="display:flex;align-items:center;gap:10px">
+          <span style="font-size:20px;line-height:1;flex-shrink:0">${_naIcon}</span>
+          <div style="flex:1;min-width:0">
+            <div style="font-size:12px;font-weight:bold;color:${_naColor};letter-spacing:.02em">${_naText}</div>
+            ${_naSub?`<div style="font-size:9px;color:#64748b;margin-top:3px">${_naSub}</div>`:''}
+          </div>
+        </div>`;
+      }
+
       // ── Workflow: multi-TF analysis board ─────────────────────────────
       const obWait     = !!pos.ob_wait_active;
       const obWaitSince= pos.ob_wait_since || '';
@@ -4851,35 +4993,105 @@ async function _updateSessionBanner() {
           </tr>`;
         }).join('');
 
-        const _obsNote = !_hasObs
-          ? ((state === 'SLEEP' && inWin) ? `<div style="padding:8px;text-align:center;color:var(--t4);font-size:9px">Calendar Blackout — Staying SLEEP</div>` : inWin ? `<div style="padding:8px;text-align:center;color:var(--t3);font-size:9px">Fetching zones at window open...</div>` : `<div style="padding:8px;text-align:center;color:var(--t4);font-size:9px">Zones will appear here at next window open</div>`)
-          : (obWait ? `<div style="padding:4px;color:#f59e0b;font-size:8px;text-align:center">⏳ No ${zoneType} zone at open — scanning every candle close${obWaitSince?' · since '+obWaitSince.substring(11,16):''}</div>` : '');
+        // ── Live entry conditions (no OB required) ────────────────────────
+        const _itm   = mon.nearest_itm || {};
+        const _pOk   = mon.prem_ok;
+        const _tOk   = mon.tv_ok;
+        const _sOk   = mon.spread_ok;
+        const _cOk   = mon.clash_ok;
+        const _hv    = mon.hedge_valid;
+        const _ic2   = v => v===true?'✓':v===false?'✗':'—';
+        const _cc2   = v => v===true?'#4ade80':v===false?'#f87171':'#4b5563';
+        // maxSp2 resolved later via _cfgGet (edit-buffer aware)
 
-        const _analysisTable = `<div style="margin-bottom:4px">
-          <table style="width:100%;border-collapse:collapse;background:#030712;border-radius:var(--r-sm);overflow:hidden;border:1px solid #0f172a">
-            <thead><tr style="background:#090e1a;color:var(--t4);font-size:7px;text-transform:uppercase">
-              <th style="padding:2px 5px;text-align:left">TF</th>
-              <th style="padding:2px 5px;text-align:left">OB Zone · Mid · Distance</th>
-              <th style="padding:2px 5px">Prox</th>
-              <th style="padding:2px 5px">Prem</th>
-              <th style="padding:2px 5px">TV</th>
-              <th style="padding:2px 5px">Sprd</th>
-              <th style="padding:2px 5px;text-align:left">Status</th>
+        // ── Resolve the active role and its per-role limits ────────────────
+        // Infer role from peer position when backend hasn't confirmed (pre-verify states).
+        // Backend sends confirmed values during VERIFY_HEDGE_LOOP; we use CFG overrides
+        // at all other times so the display is always accurate to saved parameters.
+        const _peerPos     = key === 'bull' ? (S.bear || {}) : (S.bull || {});
+        const _peerInPos   = !!(_peerPos.futures_remaining_qty > 0);
+        // Use backend-confirmed role (verify state) or infer from peer position (other states)
+        const _activeRole  = mon.active_role || (_peerInPos ? 'second_trader' : 'first_trader');
+        const _is2nd       = _activeRole === 'second_trader';
+        // Badge reads ONLY from saved CFG — never from WebSocket monitor values.
+        // mon.active_max_premium arrives every tick and would overwrite the just-saved CFG.
+        const _rolePremCfg = parseFloat(_is2nd ? CFG[pfx+'second_trader_max_premium'] : CFG[pfx+'first_trader_max_premium']) || 0;
+        const _roleTVCfg   = parseFloat(_is2nd ? CFG[pfx+'second_trader_max_time_value'] : CFG[pfx+'first_trader_max_time_value']) || 0;
+        const maxSp2r      = parseFloat(CFG[pfx+'price_diff_percent']) || 5;
+        const maxPrem = _rolePremCfg > 0 ? _rolePremCfg : 320;
+        const maxTV2  = _roleTVCfg   > 0 ? _roleTVCfg   : 220;
+
+        // ── Role badge ────────────────────────────────────────────────────
+        const _roleCol  = _is2nd ? '#a78bfa' : '#60a5fa';
+        const _roleBg   = _is2nd ? 'rgba(167,139,250,0.10)' : 'rgba(96,165,250,0.10)';
+        const _roleB    = _is2nd ? 'rgba(167,139,250,0.30)' : 'rgba(96,165,250,0.30)';
+        const _roleNum  = _is2nd ? '②' : '①';
+        const _roleLbl  = _is2nd ? '2ND TRADER' : '1ST TRADER';
+        const _roleDesc = _is2nd ? 'peer in position' : 'no peer position';
+        const _confirmed = !!mon.active_role;
+
+        // ── ITM option info ──────────────────────────────────────────────
+        const _hasItm  = !!_itm.symbol;
+        const _itmBlock = _hasItm
+          ? `<div style="background:#050f1e;border:1px solid #1e3a5f;border-radius:var(--r-sm);padding:6px 10px;margin-bottom:6px">
+               <div style="font-size:8px;color:#64748b;text-transform:uppercase;letter-spacing:.08em;margin-bottom:4px">Nearest ITM ${key==='bull'?'PUT':'CALL'}</div>
+               <div style="display:flex;gap:16px;align-items:baseline;flex-wrap:wrap">
+                 <span style="font-size:11px;font-weight:bold;color:#22d3ee;font-family:monospace">${_itm.symbol}</span>
+                 <span style="font-size:9px;color:#64748b">Strike <b style="color:#f59e0b;font-family:monospace">$${fmt(_itm.strike||0,0)}</b></span>
+                 <span style="font-size:9px;color:#64748b">Intrinsic <b style="color:#94a3b8;font-family:monospace">$${fmt(_itm.intrinsic||0,2)}</b></span>
+               </div>
+             </div>`
+          : `<div style="font-size:9px;color:#334155;padding:6px 0;margin-bottom:4px">${inWin?(inPos?'—':'Scanning for nearest ITM...'):'—'}</div>`;
+
+        // ── Conditions rows ──────────────────────────────────────────────
+        const _cRow = (label, liveVal, limit, ok) => {
+          const _okCol  = ok===true ? '#4ade80' : ok===false ? '#f87171' : '#4b5563';
+          const _okLbl  = ok===true ? '✓ PASS' : ok===false ? '✗ FAIL' : '—';
+          const _okBg   = ok===true ? 'rgba(34,197,94,0.06)' : ok===false ? 'rgba(248,113,113,0.06)' : '';
+          return `<tr style="border-bottom:1px solid #0a0f1a;background:${_okBg}">
+            <td style="padding:5px 8px;font-size:9px;color:#94a3b8">${label}</td>
+            <td style="padding:5px 8px;font-size:10px;font-family:monospace;font-weight:bold;color:#e2e8f0">${liveVal}</td>
+            <td style="padding:5px 8px;font-size:9px;color:#64748b">${limit}</td>
+            <td style="padding:5px 8px;font-size:9px;font-weight:bold;color:${_okCol};text-align:right">${_okLbl}</td>
+          </tr>`;
+        };
+
+        const _clashRow2 = (_cOk !== null && _cOk !== undefined && !inPos)
+          ? _cRow('Strike Clash', _cOk===false?'clash!':'clear', key==='bull'?'PUT < Bear CALL':'CALL > Bull PUT', _cOk)
+          : '';
+
+        const _analysisTable = `<div style="margin-bottom:4px;background:#030712;border-radius:var(--r-sm);border:1px solid #0f172a;padding:6px">
+
+          <!-- Role badge -->
+          <div style="display:flex;align-items:center;gap:8px;padding:5px 8px;margin-bottom:6px;background:${_roleBg};border:1px solid ${_roleB};border-radius:var(--r-sm)">
+            <span style="font-size:11px;font-weight:bold;color:${_roleCol}">${_roleNum} ${_roleLbl}</span>
+            <span style="font-size:8px;color:#6b7280">${_roleDesc}${_confirmed?' ✓':' ~'}</span>
+            <div style="margin-left:auto;display:flex;gap:10px;font-size:9px;font-family:monospace">
+              <span style="color:#64748b">Ask <b style="color:${_roleCol}">≤$${fmt(maxPrem,0)}</b></span>
+              <span style="color:#64748b">TV <b style="color:${_roleCol}">≤$${fmt(maxTV2,0)}</b></span>
+              <span style="color:#64748b">Spread <b style="color:${_roleCol}">≤${maxSp2r}%</b></span>
+            </div>
+          </div>
+
+          <!-- Nearest ITM block -->
+          ${_itmBlock}
+
+          <!-- Conditions table: Condition | Live Value | Your Limit | Status -->
+          <table style="width:100%;border-collapse:collapse;background:#050a14;border-radius:var(--r-sm);overflow:hidden;border:1px solid #0f172a">
+            <thead><tr style="background:#090e1a">
+              <th style="padding:4px 8px;color:#334155;font-size:7px;text-align:left;font-weight:600;text-transform:uppercase;letter-spacing:.08em">Condition</th>
+              <th style="padding:4px 8px;color:#334155;font-size:7px;text-align:left;font-weight:600;text-transform:uppercase;letter-spacing:.08em">Live Value</th>
+              <th style="padding:4px 8px;color:#334155;font-size:7px;text-align:left;font-weight:600;text-transform:uppercase;letter-spacing:.08em">Your Limit</th>
+              <th style="padding:4px 8px;color:#334155;font-size:7px;text-align:right;font-weight:600;text-transform:uppercase;letter-spacing:.08em">Status</th>
             </tr></thead>
-            <tbody>${_hasObs ? _rows : ''}</tbody>
+            <tbody>
+              ${_cRow('Ask (premium)', _itm.ask!=null?'$'+fmt(_itm.ask,2):'—', '≤ $'+fmt(maxPrem,0), _pOk)}
+              ${_cRow('Time Value', _itm.time_value!=null?'$'+fmt(_itm.time_value,2):'—', '≤ $'+fmt(maxTV2,0), _tOk)}
+              ${_cRow('Spread %', _itm.spread_pct!=null?fmt(_itm.spread_pct,2)+'%':'—', '≤ '+maxSp2r+'%', _sOk)}
+              ${_clashRow2}
+            </tbody>
           </table>
-          ${_obsNote}
-          ${(() => {
-            if (!_hasObs || inPos) return '';
-            const _inZoneTFs = _tfAnalysis.filter(a => a.inZone).map(a => a.tf.toUpperCase());
-            if (_inZoneTFs.length > 1) {
-              return `<div style="margin-top:4px;padding:5px 8px;background:rgba(245,158,11,0.10);border:1px solid #f59e0b55;border-radius:var(--r-sm);display:flex;align-items:center;gap:6px">
-                <span style="color:#f59e0b;font-weight:bold;font-size:10px">⚡ MULTI-ZONE OVERLAP</span>
-                <span style="font-size:9px;color:#cbd5e1">${_inZoneTFs.join(' + ')} — both active simultaneously → <b style="color:#f59e0b">${_inZoneTFs[0]}</b> wins (smallest TF rule)</span>
-              </div>`;
-            }
-            return `<div style="font-size:8px;color:var(--t4);padding:2px 4px">${noZoneFinal?'No zone this session':'Smallest TF wins when multiple zones trigger simultaneously'}</div>`;
-          })()}
+          ${_hv && !inPos ? `<div style="margin-top:6px;padding:6px 8px;background:rgba(34,197,94,0.12);border:1px solid #4ade8044;border-radius:var(--r-sm);font-size:11px;font-weight:bold;color:#4ade80;text-align:center;letter-spacing:.04em">ALL CONDITIONS MET — EXECUTING</div>` : ''}
         </div>`;
 
         // ── Position active: detailed management view ──────────────────
@@ -4900,18 +5112,28 @@ async function _updateSessionBanner() {
           const hPnLCol   = hedgePnL>=0?'#4ade80':'#f87171';
           const tPnLCol   = totPnL>=0?'#4ade80':'#f87171';
 
-          // Partial trigger details
-          const partTrigPnL = prem * pRatioV;
+          // Partial trigger details (new formula: price = entry + premium/qty)
+          const premPerUnit = qty_pos > 0 ? prem / qty_pos : 0;
           const partHalf    = qty_pos * 0.5;
-          const newAvg      = key==='bull' ? futE - tv_entry : futE + tv_entry;
-          const rebuyCalc   = key==='bull' ? futE - 2*tv_entry : futE + 2*tv_entry;
+          const isSecond    = !!(pos.is_second_trader);
+          const rebuyCalc   = isSecond
+            ? futE
+            : (key==='bull' ? futE - tv_entry/2 : futE + tv_entry/2);
+          const newAvg      = key==='bull' ? futE - tv_entry/4 : futE + tv_entry/4;
 
-          const _pnlRow = `<div style="display:flex;gap:12px;padding:5px 0;border-bottom:1px solid #0f172a;margin-bottom:5px">
-            <div><span style="color:var(--t3);font-size:9px">${key==='bull'?'LONG▲':'SHORT▼'} ${rem_qty}BTC@$${fmt(futE,0)}</span></div>
-            <div><span style="color:var(--t3);font-size:9px">Fut:</span><b style="color:${fPnLCol};font-size:10px;margin-left:3px">${futPnL>=0?'+':''}$${fmt(futPnL,2)}</b></div>
-            <div><span style="color:var(--t3);font-size:9px">Hedge:</span><b style="color:${hPnLCol};font-size:10px;margin-left:3px">${hedgePnL>=0?'+':''}$${fmt(hedgePnL,2)}</b></div>
-            <div><span style="color:var(--t3);font-size:9px">Total:</span><b style="color:${tPnLCol};font-size:12px;margin-left:3px">${totPnL>=0?'+':''}$${fmt(totPnL,2)}</b></div>
-          </div>`;
+          const _pnlRow = futClosed
+            ? `<div style="display:flex;gap:12px;padding:5px 0;border-bottom:1px solid #0f172a;margin-bottom:5px">
+                <div><span style="color:#4ade80;font-size:9px;font-weight:bold">Futures CLOSED ✓</span></div>
+                <div><span style="color:var(--t3);font-size:9px">Realized:</span><b style="color:${realized>=0?'#4ade80':'#f87171'};font-size:10px;margin-left:3px">${realized>=0?'+':''}$${fmt(realized,2)}</b></div>
+                <div><span style="color:var(--t3);font-size:9px">Hedge:</span><b style="color:${hPnLCol};font-size:10px;margin-left:3px">${hedgePnL>=0?'+':''}$${fmt(hedgePnL,2)}</b></div>
+                <div><span style="color:var(--t3);font-size:9px">Total:</span><b style="color:${(realized+hedgePnL)>=0?'#4ade80':'#f87171'};font-size:12px;margin-left:3px">${(realized+hedgePnL)>=0?'+':''}$${fmt(realized+hedgePnL,2)}</b></div>
+              </div>`
+            : `<div style="display:flex;gap:12px;padding:5px 0;border-bottom:1px solid #0f172a;margin-bottom:5px">
+                <div><span style="color:var(--t3);font-size:9px">${key==='bull'?'LONG▲':'SHORT▼'} ${rem_qty}BTC@$${fmt(futE,0)}</span></div>
+                <div><span style="color:var(--t3);font-size:9px">Fut:</span><b style="color:${fPnLCol};font-size:10px;margin-left:3px">${futPnL>=0?'+':''}$${fmt(futPnL,2)}</b></div>
+                <div><span style="color:var(--t3);font-size:9px">Hedge:</span><b style="color:${hPnLCol};font-size:10px;margin-left:3px">${hedgePnL>=0?'+':''}$${fmt(hedgePnL,2)}</b></div>
+                <div><span style="color:var(--t3);font-size:9px">Total:</span><b style="color:${tPnLCol};font-size:12px;margin-left:3px">${totPnL>=0?'+':''}$${fmt(totPnL,2)}</b></div>
+              </div>`;
 
           const _ordRow = (status, label, price_v, detail, col) => {
             const sc = {FILLED:'#4ade80',PENDING:'#f59e0b',WAITING:'#4b5563',CANCELLED:'#6b7280'}[status]||'#4b5563';
@@ -4925,23 +5147,38 @@ async function _updateSessionBanner() {
             </div>`;
           };
 
+          if (futClosed) {
+            return _pnlRow +
+              _ordRow('FILLED', `Futures fully closed — target reached`, 0,
+                `Session PnL target hit · Realized ${realized>=0?'+':''}$${fmt(realized,2)}`, '#4ade80') +
+              _ordRow('PENDING', `Squareoff @ ${ft(forceH,forceM)} IST — sell ${key==='bull'?'PUT':'CALL'} hedge`, 0,
+                `${pos.option_symbol||'Option'} · will sell at limit (mark) · hedge PnL: ${hedgePnL>=0?'+':''}$${fmt(hedgePnL,2)}`, '#22d3ee');
+          }
           return _pnlRow +
             _ordRow(
               pDone?'FILLED':'PENDING',
               `50% Partial — sell ${fmt(partHalf,3)} BTC`,
               partTrig||0,
-              `Trigger: fut PnL ≥ prem×${pRatioV} = $${fmt(prem,0)}×${pRatioV} = $${fmt(partTrigPnL,0)} · Sell price ≈ $${fmt(partTrig,0)}${pDone?' · ✓ Realized +$'+fmt(realized,2):''}`,
+              `Trigger: price ${key==='bull'?'≥':'≤'} entry $${fmt(futE,0)} + premium/qty $${fmt(premPerUnit,0)} = $${fmt(partTrig,0)}${pDone?' · ✓ Realized +$'+fmt(realized,2):''}`,
               '#f59e0b'
             ) +
-            (pDone ? _ordRow(
-              rebuy>0?'PENDING':'FILLED',
-              rebuy>0 ? `Rebuy limit — ${fmt(rebuyQ,3)} BTC` : `Rebuy filled · new avg $${fmt(newAvg,0)}`,
-              rebuy>0 ? rebuy : 0,
-              rebuy>0
-                ? `Avg $${fmt(futE,0)} ${key==='bull'?'−':'+'} 2×TV $${fmt(tv_entry,1)} = $${fmt(rebuyCalc,0)} · fills when price ${key==='bull'?'↓':'↑'} · new avg = $${fmt(newAvg,0)}`
-                : `✓ Avg shifted to $${fmt(newAvg,0)} (entry ${key==='bull'?'−':'+'} TV $${fmt(tv_entry,1)})`,
+            _ordRow(
+              pDone ? (rebuy>0?'PENDING':'FILLED') : 'WAITING',
+              pDone
+                ? (rebuy>0 ? `Rebuy limit — ${fmt(rebuyQ,3)} BTC` : `Rebuy filled · new avg ≈$${fmt(newAvg,0)}`)
+                : `Rebuy (after partial) — ${fmt(partHalf,3)} BTC`,
+              pDone ? (rebuy>0 ? rebuy : 0) : rebuyCalc,
+              pDone
+                ? (rebuy>0
+                    ? (isSecond
+                        ? `Second trader — rebuy at avg $${fmt(rebuyCalc,0)} (exact entry)`
+                        : `Avg $${fmt(futE,0)} ${key==='bull'?'−':'+'} TV/2 $${fmt(tv_entry/2,1)} = $${fmt(rebuyCalc,0)} · fills when price ${key==='bull'?'↓':'↑'}`)
+                    : `✓ Filled — new avg ≈$${fmt(newAvg,0)}`)
+                : (isSecond
+                    ? `Activates after partial · will rebuy at avg $${fmt(rebuyCalc,0)} (exact entry)`
+                    : `Activates after partial · approx avg ${key==='bull'?'−':'+'} TV/2 = $${fmt(rebuyCalc,0)}`),
               '#22d3ee'
-            ) : '') +
+            ) +
             _ordRow(
               'PENDING',
               `Full TP — close ${fmt(rem_qty,3)} BTC`,
@@ -4953,9 +5190,9 @@ async function _updateSessionBanner() {
               `${key==='bull'?'PUT':'CALL'} LIMIT first → Futures market`, '#f87171');
         })() : '';
 
-        return _winRow + _analysisTable + (_inZoneReal && !inPos && isVerif
+        return _winRow + _analysisTable + (_hv && !inPos && isVerif
           ? `<div style="padding:5px;margin-top:2px;background:rgba(245,158,11,0.1);border:1px solid #f59e0b33;border-radius:var(--r-sm);text-align:center;font-size:10px;color:#f59e0b;font-weight:bold;animation:blink-ok .8s infinite">
-              ⚡ Conditions met — EXECUTING ${key==='bull'?'LONG':'SHORT'} trade
+              ⚡ All conditions met — EXECUTING ${key==='bull'?'LONG':'SHORT'} trade
              </div>`
           : '') + _posSection;
 
@@ -4971,28 +5208,39 @@ async function _updateSessionBanner() {
           const tPnLCol = totPnL>=0?'#4ade80':'#f87171';
           const pct = session>0?Math.min(Math.max(totPnL/session*100,0),100):0;
           posCard.innerHTML = `
-            <div class="ct" style="color:#f59e0b;margin-bottom:6px">Active Position</div>
+            <div class="ct" style="color:${futClosed?'#22d3ee':'#f59e0b'};margin-bottom:6px">${futClosed?'Option Held — Awaiting Squareoff':'Active Position'}</div>
             <div style="background:#030712;border-radius:var(--r-sm);padding:4px 7px;margin-bottom:6px;font-size:10px;display:flex;gap:16px;align-items:baseline">
               <span class="gr">Entry</span><span style="color:#22d3ee;font-family:monospace">${pos.execution_time_ist||'—'}</span>
               <span class="gr">Mark</span><span style="color:#f59e0b;font-weight:bold;font-family:monospace">$${fmt(price,2)}</span>
-              <span class="gr">Qty</span><span style="color:var(--t2)">${fmt(pos.futures_remaining_qty||0,4)} BTC</span>
+              ${futClosed
+                ? `<span class="gr">Futures</span><span style="color:#4ade80;font-weight:bold">CLOSED ✓</span>`
+                : `<span class="gr">Qty</span><span style="color:var(--t2)">${fmt(pos.futures_remaining_qty||0,4)} BTC</span>`}
             </div>
             <div style="display:grid;grid-template-columns:1fr 1fr;gap:5px;margin-bottom:6px">
+              ${futClosed
+                ? `<div style="background:#050a14;padding:6px 8px;border-radius:var(--r-sm);opacity:0.7">
+                    <div class="ct" style="margin-bottom:2px;color:#6b7280">Futures ${key==='bull'?'LONG ▲':'SHORT ▼'} <span style="color:#4ade80;font-size:9px">✓ CLOSED</span></div>
+                    <div class="rw"><span class="lb">Target hit</span><span class="vl" style="color:#4ade80;font-size:9px">Full close executed</span></div>
+                    <div style="font-size:14px;font-weight:bold;color:${realized>=0?'#4ade80':'#f87171'};margin-top:4px">${realized>=0?'+':''}$${fmt(realized,2)} <span style="font-size:9px;color:#6b7280">realized</span></div>
+                  </div>`
+                : `<div style="background:#050a14;padding:6px 8px;border-radius:var(--r-sm)">
+                    <div class="ct" style="margin-bottom:2px">Futures ${key==='bull'?'LONG ▲':'SHORT ▼'}</div>
+                    <div class="rw"><span class="lb">Avg Cost</span><span class="vl y">$${fmt(pos.futures_entry||0,2)}</span></div>
+                    <div class="rw"><span class="lb">Mark Price</span><span class="vl">$${fmt(price,2)}</span></div>
+                    <div style="font-size:16px;font-weight:bold;color:${fPnLCol};margin-top:4px">${futPnL>=0?'+':''}$${fmt(futPnL,2)}</div>
+                  </div>`}
               <div style="background:#050a14;padding:6px 8px;border-radius:var(--r-sm)">
-                <div class="ct" style="margin-bottom:2px">Futures ${key==='bull'?'LONG ▲':'SHORT ▼'}</div>
-                <div class="rw"><span class="lb">Avg Cost</span><span class="vl y">$${fmt(pos.futures_entry||0,2)}</span></div>
-                <div class="rw"><span class="lb">Mark Price</span><span class="vl">$${fmt(price,2)}</span></div>
-                <div style="font-size:16px;font-weight:bold;color:${fPnLCol};margin-top:4px">${futPnL>=0?'+':''}$${fmt(futPnL,2)}</div>
-              </div>
-              <div style="background:#050a14;padding:6px 8px;border-radius:var(--r-sm)">
-                <div class="ct" style="margin-bottom:2px">Hedge ${key==='bull'?'PUT':'CALL'}</div>
+                <div class="ct" style="margin-bottom:2px">Hedge ${key==='bull'?'PUT':'CALL'} ${futClosed?'<span style="color:#f59e0b;font-size:9px">⏳ PENDING SELL</span>':''}</div>
                 <div class="rw"><span class="lb">Symbol</span><span class="vl c" style="font-size:9px">${pos.option_symbol||'—'}</span></div>
-                <div class="rw"><span class="lb">Premium</span><span class="vl r">$${fmt(pos.hedge_premium_paid||0,2)}</span></div>
+                <div class="rw"><span class="lb">Entry cost</span><span class="vl r">$${fmt(pos.hedge_premium_paid||0,2)}</span></div>
                 <div style="font-size:14px;font-weight:bold;color:${hPnLCol};margin-top:4px">${hedgePnL>=0?'+':''}$${fmt(hedgePnL,2)}</div>
               </div>
             </div>
-            <div class="rw"><span class="lb">Unrealised PnL (both legs)</span><span style="font-size:18px;font-weight:bold;color:${tPnLCol}">${totPnL>=0?'+':''}$${fmt(totPnL,2)}</span><span class="gr" style="font-size:9px">target $${fmt(session,0)}</span></div>
-            <div class="pbar" style="margin-top:3px"><div class="pbf" style="width:${pct}%;background:${tPnLCol}"></div></div>`;
+            ${futClosed
+              ? `<div class="rw"><span class="lb">Total Session PnL (futures realized + option live)</span><span style="font-size:18px;font-weight:bold;color:${(realized+hedgePnL)>=0?'#4ade80':'#f87171'}">${(realized+hedgePnL)>=0?'+':''}$${fmt(realized+hedgePnL,2)}</span></div>`
+              : `<div class="rw"><span class="lb">Unrealised PnL (both legs)</span><span style="font-size:18px;font-weight:bold;color:${tPnLCol}">${totPnL>=0?'+':''}$${fmt(totPnL,2)}</span><span class="gr" style="font-size:9px">target $${fmt(session,0)}</span></div>
+            <div class="pbar" style="margin-top:3px"><div class="pbf" style="width:${pct}%;background:${tPnLCol}"></div></div>`}
+            `;
         }
       }
 
@@ -5014,21 +5262,44 @@ async function _updateSessionBanner() {
           <span style="font-size:9px;color:var(--t4)">${detail}</span>
         </div>`;
       };
+      const _isSecOrd  = !!(pos.is_second_trader);
+      const _tvEntry   = pos.hedge_time_value_at_entry || 0;
+      const _futE      = pos.futures_entry || 0;
+      const _partHalf  = (pos.futures_qty||1) * 0.5;
+      const _rebuyCalc = _isSecOrd ? _futE : (key==='bull' ? _futE - _tvEntry/2 : _futE + _tvEntry/2);
+      const _newAvg    = key==='bull' ? _futE - _tvEntry/4 : _futE + _tvEntry/4;
       ordCard.innerHTML = `<div class="ct" style="margin-bottom:4px">Order Chain</div>` +
         (inPos ? (
-          mkOrd(!pDone?'PENDING':'FILLED', `50% Partial TP — sell ${fmt((pos.futures_qty||1)*.5,3)} BTC`, ptrig,
-            pDone?`✓ Sold @ market — Realized +$${fmt(realized,2)}`:`fut PnL ≥ $${fmt((pos.hedge_premium_paid||0)*pRatio,0)}`, '#f59e0b') +
+          futClosed ? (
+            mkOrd('FILLED', `Futures closed — target reached`, 0,
+              `Session PnL target hit · Realized ${realized>=0?'+':''}$${fmt(realized,2)}`, '#4ade80') +
+            mkOrd('PENDING', `Squareoff @ ${ft(forceH,forceM)} IST — sell ${key==='bull'?'PUT':'CALL'} hedge`, 0,
+              `${pos.option_symbol||'Option'} · will sell at limit (mark price) at squareoff time`, '#22d3ee')
+          ) : (
+          mkOrd(!pDone?'PENDING':'FILLED', `50% Partial TP — sell ${fmt(_partHalf,3)} BTC`, ptrig,
+            pDone?`✓ Sold @ market — Realized +$${fmt(realized,2)}`:`price ${key==='bull'?'≥':'≤'} entry + premium/qty = $${fmt(ptrig,0)}`, '#f59e0b') +
 
-          (pDone ? mkOrd(rebuy>0?'PENDING':'FILLED',
-            rebuy>0?`Rebuy Limit — ${fmt(rebuyQ,3)} BTC to shift avg down by TV`:`Rebuy limit result`,
-            rebuy>0?rebuy:0,
-            rebuy>0?`When price crosses ↓ · Cancels if TP hits first`:`✓ Avg cost shifted`, '#22d3ee') : '') +
+          mkOrd(
+            pDone ? (rebuy>0?'PENDING':'FILLED') : 'WAITING',
+            pDone
+              ? (rebuy>0?`Rebuy Limit — ${fmt(rebuyQ,3)} BTC`:`Rebuy filled · new avg ≈$${fmt(_newAvg,0)}`)
+              : `Rebuy (after partial) — ${fmt(_partHalf,3)} BTC`,
+            pDone ? (rebuy>0?rebuy:0) : _rebuyCalc,
+            pDone
+              ? (rebuy>0
+                  ? (_isSecOrd?`Second trader — rebuy at avg (exact entry)`:`avg ${key==='bull'?'−':'+'} TV/2 · fills when price ${key==='bull'?'↓':'↑'}`)
+                  : `✓ Avg shifted to ≈$${fmt(_newAvg,0)}`)
+              : (_isSecOrd
+                  ? `Activates after partial · will rebuy at avg $${fmt(_rebuyCalc,0)} (exact entry)`
+                  : `Activates after partial · approx avg ${key==='bull'?'−':'+'} TV/2 = $${fmt(_rebuyCalc,0)}`),
+            '#22d3ee') +
 
           mkOrd(inPos?'PENDING':'WAITING', `Full TP — close all when fut PnL reaches $${fmt(remaining,0)} more`, fullTp,
             pDone&&rebuy===0?`New avg factored in`:`$${fmt(fTarget,0)} total target`, '#a78bfa') +
 
           mkOrd('WAITING', `Squareoff @ ${ft(forceH,forceM)} IST — close ALL regardless`, 0,
             `${key==='bull'?'PUT':'CALL'} option first (limit @ mark) → futures market`, '#f87171')
+          )
         ) : `<div style="color:var(--t4);font-size:10px;text-align:center;padding:8px">No active orders — waiting for trade setup</div>`);
     }
 
@@ -5749,61 +6020,26 @@ async function _updateSessionBanner() {
           border: inWin ? col : '#1f2937',
         },
         {
-          id: 'ob',
-          icon: obWait ? '⏳' : locked ? '🔒' : ar.analysis_time ? '✗' : '⬜',
-          label: obWait ? 'OB WATCH MODE'
-               : locked ? 'OB ZONE LOCKED'
-               : ar.error ? 'NO OB FOUND'
-               : 'OB ANALYSIS',
-          detail: obWait
-            ? `No ${ztype} zone at open · scanning ${ar.tf||'15m'} candles`
-            : locked
-            ? `$${Math.round(locked)} mid · ${oz.grade||''} (${oz.score||0}) · ${ar.tf||'?'} TF`
-            : ar.error || 'Fetches zones at window open',
-          active: state === 'CHECK_ELIGIBILITY' || (inWin && !locked && !obWait && !ar.analysis_time),
-          done:   !!locked,
-          col:    obWait ? '#1c1107' : locked ? '#14532d' : ar.error ? '#1a0a0a' : '#111827',
-          border: obWait ? '#f59e0b' : locked ? col : ar.error ? '#7f1d1d' : '#1f2937',
-          pulse:  obWait,
-        },
-        {
-          id: 'price',
-          icon: pos.eligible === true ? '✓' : locked && !obWait ? '👁' : '⬜',
-          label: pos.eligible === true ? 'PRICE IN ZONE'
-               : locked && !obWait ? 'WATCHING PRICE'
-               : 'PRICE CHECK',
-          detail: locked
-            ? (() => {
-                const d = Math.abs(price - locked);
-                const maxD = (S.config || {})[key+'_max_distance_from_line'] || '?';
-                return `Dist ${Math.round(d)}pts · need ≤${maxD}pts`;
-              })()
-            : 'Waits for price to approach OB zone mid',
-          active: !!locked && !obWait && pos.eligible !== true,
-          done:   pos.eligible === true,
-          col:    pos.eligible === true ? '#14532d' : locked && !obWait ? '#0c1a07' : '#111827',
-          border: pos.eligible === true ? col : locked && !obWait ? col+'66' : '#1f2937',
-          pulse:  !!locked && !obWait && pos.eligible !== true,
-        },
-        {
           id: 'verify',
           icon: state === 'VERIFY_HEDGE_LOOP' ? '⚡' : state === 'EXECUTE' ? '✓' : '⬜',
           label: state === 'VERIFY_HEDGE_LOOP' ? 'VERIFYING HEDGE' : 'HEDGE CHECK',
           detail: state === 'VERIFY_HEDGE_LOOP'
             ? (() => {
+                // OB proximity is NOT a required condition — entry is purely option-based
                 const checks = [
-                  { k:'prox_ok',   l:'Proximity' },
-                  { k:'prem_ok',   l:'Premium'   },
-                  { k:'tv_ok',     l:'Time Value' },
-                  { k:'spread_ok', l:'Spread'     },
+                  { k:'prem_ok',   l:'Ask'      },
+                  { k:'tv_ok',     l:'TV'       },
+                  { k:'spread_ok', l:'Spread'   },
+                  { k:'clash_ok',  l:'No Clash' },
                 ].map(c => {
                   const v = mon[c.k];
                   const ic = v === true ? '✓' : v === false ? '✗' : '·';
-                  return `${ic} ${c.l}`;
+                  const col = v === true ? '#4ade80' : v === false ? '#f87171' : '#4b5563';
+                  return `<span style="color:${col}">${ic} ${c.l}</span>`;
                 }).join(' &nbsp;');
                 return checks;
               })()
-            : '4 conditions must all pass simultaneously',
+            : 'Ask ≤ max · TV ≤ max · Spread ≤ max · No strike clash',
           active: state === 'VERIFY_HEDGE_LOOP',
           done:   ['EXECUTE','MANAGING_POSITION','PARTIAL_BOOKING','FORCE_CLOSE'].includes(state),
           col:    state === 'VERIFY_HEDGE_LOOP' ? '#2e1065' : '#111827',
@@ -7527,10 +7763,10 @@ async function _updateSessionBanner() {
       // ── Bullish Trader ──────────────────────────────────────────────────────
       {
         id: 'sg-bull', label: '📈 Bullish Trader', col: '#4ade80',
-        desc: 'Buys futures LONG + ITM PUT option as hedge. Trades when price is near the Support (L-Line).',
+        desc: 'Buys futures LONG + ITM PUT option as hedge. Entry when window opens and all conditions pass.',
         subs: [
           {
-            label: '🕐 Trading Window — When is this trader allowed to look for trades?',
+            label: '🕐 Trading Window',
             timepicks: [
               { label: 'Window Open',  hkey: 'bull_trade_start_h', mkey: 'bull_trade_start_m', dh: 9,  dm: 30 },
               { label: 'Window Close', hkey: 'bull_trade_end_h',   mkey: 'bull_trade_end_m',   dh: 11, dm: 45 },
@@ -7538,32 +7774,18 @@ async function _updateSessionBanner() {
             ], params: []
           },
           {
-            label: '✅ Eligibility — Was BTC far enough above the H-Line before coming back? (Retest check)',
+            label: '🎯 Option Filters — all must pass simultaneously to enter',
             params: [
-              { k: 'bull_n_hours',  l: 'Look-back Hours',       step: 1,  min: 1,   max: 72,   note: 'How many hours back to check. Example: 2 = check last 2 hours of candles' },
-              { k: 'bull_n_points', l: 'Min Distance Required (pts)', step: 10, min: 10, max: 5000, note: 'BTC must have been at least this many pts above H-Line in lookback window. Example: 150 means price was 150 pts above the line' },
+              { k: 'bull_max_premium',        l: 'Max Ask ($)',       step: 10,  min: 10, max: 10000, note: 'Reject if PUT ask > this AND intrinsic > 0 (ITM check)' },
+              { k: 'bull_max_time_value',      l: 'Max Time Value ($)',step: 5,   min: 0,  max: 1000,  note: 'TV = ask − intrinsic. Must be ≤ this' },
+              { k: 'bull_price_diff_percent',  l: 'Max Spread (%)',    step: 0.5, min: 0,  max: 50,    note: '|ask−mark|/mark × 100 must be ≤ this' },
             ]
           },
           {
-            label: '📍 Proximity Guard — How close to trigger line must price stay while we verify the hedge?',
+            label: '💼 Position Size & Targets',
             params: [
-              { k: 'bull_max_distance_from_line', l: 'Max Allowed Drift (pts)', step: 5, min: 5, max: 2000, note: 'If price moves more than this many pts away from the trigger line, setup is cancelled. Example: 100 = price can be at most 100 pts away' },
-            ]
-          },
-          {
-            label: '🎯 Option Filters — All 3 must pass at the same moment to enter the trade',
-            params: [
-              { k: 'bull_max_premium',       l: 'Max Option Ask Price ($)',  step: 10,  min: 10,  max: 10000, note: 'Reject if option costs more than this. Example: 500 = option ask must be ≤ $500' },
-              { k: 'bull_price_diff_percent', l: 'Max Ask/Mark Spread (%)',   step: 0.5, min: 0,   max: 50,    note: 'How far ask can be from fair mark price. Example: 5 = ask within 5% of mark price (liquidity check)' },
-            ]
-          },
-          {
-            label: '💼 Position Size & Profit Targets',
-            params: [
-              { k: 'bull_contract_qty',         l: 'Trade Size (BTC)',         step: 0.01, min: 0.01, max: 1,      note: 'How many BTC to trade per setup. Example: 1 = 1 BTC futures + 1 PUT option contract' },
-              { k: 'bull_partial_profit_ratio',  l: 'Partial Profit Trigger',   step: 0.01, min: 0.01, max: 10,     note: 'Sell half futures when profit = this × premium paid. Example: 0.5 = sell 50% futures when profit ≥ 50% of option cost' },
-              { k: 'bull_full_close_target',     l: 'Full Close Target ($)',    step: 10,   min: 10,   max: 100000, note: 'Close everything when total profit reaches this. Example: 800 = close when total PnL ≥ $800' },
-              { k: 'bull_rebuy_mode', l: 'Rebuy Level Mode', opts: [{v:'tv_based', l:'avg − 2×TV  (default: price retraces 2× time value)'}, {v:'at_avg', l:'at avg entry  (price must return to exact entry)'}], note: 'Where to set the rebuy limit after partial booking' },
+              { k: 'bull_contract_qty',     l: 'Trade Size (BTC)',      step: 0.01, min: 0.01, max: 10,    note: '1 BTC futures + 1 PUT contract per trade' },
+              { k: 'bull_session_pnl_target', l: 'Session Target ($)',  step: 10,   min: 10,   max: 100000, note: 'Close futures when total PnL (fut+hedge unrealised) ≥ this' },
             ]
           },
         ]
@@ -7572,10 +7794,10 @@ async function _updateSessionBanner() {
       // ── Bearish Trader ──────────────────────────────────────────────────────
       {
         id: 'sg-bear', label: '📉 Bearish Trader', col: '#f87171',
-        desc: 'Sells futures SHORT + ITM CALL option as hedge. Trades when price is near the Resistance (H-Line).',
+        desc: 'Sells futures SHORT + ITM CALL option as hedge. Entry when window opens and all conditions pass.',
         subs: [
           {
-            label: '🕐 Trading Window — When is this trader allowed to look for trades?',
+            label: '🕐 Trading Window',
             timepicks: [
               { label: 'Window Open',  hkey: 'bear_trade_start_h', mkey: 'bear_trade_start_m', dh: 9,  dm: 30 },
               { label: 'Window Close', hkey: 'bear_trade_end_h',   mkey: 'bear_trade_end_m',   dh: 11, dm: 45 },
@@ -7583,32 +7805,18 @@ async function _updateSessionBanner() {
             ], params: []
           },
           {
-            label: '✅ Eligibility — Was BTC far enough below the L-Line before coming back? (Retest check)',
+            label: '🎯 Option Filters — all must pass simultaneously to enter',
             params: [
-              { k: 'bear_n_hours',  l: 'Look-back Hours',            step: 1,  min: 1,   max: 72,   note: 'How many hours back to check. Example: 2 = check last 2 hours of candles' },
-              { k: 'bear_n_points', l: 'Min Distance Required (pts)', step: 10, min: 10,  max: 5000, note: 'BTC must have been at least this many pts below L-Line. Example: 150 = price was 150 pts below the line' },
+              { k: 'bear_max_premium',        l: 'Max Ask ($)',       step: 10,  min: 10, max: 10000, note: 'Reject if CALL ask > this AND intrinsic > 0 (ITM check)' },
+              { k: 'bear_max_time_value',      l: 'Max Time Value ($)',step: 5,   min: 0,  max: 1000,  note: 'TV = ask − intrinsic. Must be ≤ this' },
+              { k: 'bear_price_diff_percent',  l: 'Max Spread (%)',    step: 0.5, min: 0,  max: 50,    note: '|ask−mark|/mark × 100 must be ≤ this' },
             ]
           },
           {
-            label: '📍 Proximity Guard — How close to trigger line must price stay while we verify the hedge?',
+            label: '💼 Position Size & Targets',
             params: [
-              { k: 'bear_max_distance_from_line', l: 'Max Allowed Drift (pts)', step: 5, min: 5, max: 2000, note: 'Setup is cancelled if price moves beyond this. Example: 100 = allow max 100 pts drift from trigger line' },
-            ]
-          },
-          {
-            label: '🎯 Option Filters — All 3 must pass at the same moment to enter the trade',
-            params: [
-              { k: 'bear_max_premium',       l: 'Max Option Ask Price ($)',  step: 10,  min: 10,  max: 10000, note: 'Reject if CALL option costs more than this. Example: 500 = option ask must be ≤ $500' },
-              { k: 'bear_price_diff_percent', l: 'Max Ask/Mark Spread (%)',   step: 0.5, min: 0,   max: 50,    note: 'Example: 5 = ask must be within 5% of mark price' },
-            ]
-          },
-          {
-            label: '💼 Position Size & Profit Targets',
-            params: [
-              { k: 'bear_contract_qty',         l: 'Trade Size (BTC)',       step: 0.01, min: 0.01, max: 1,      note: 'How many BTC to trade. Example: 1 = 1 BTC short futures + 1 CALL option contract' },
-              { k: 'bear_partial_profit_ratio',  l: 'Partial Profit Trigger', step: 0.01, min: 0.01, max: 10,     note: 'Sell half futures when profit = this × premium paid. Example: 0.5 = sell when profit ≥ 50% of option cost' },
-              { k: 'bear_full_close_target',     l: 'Full Close Target ($)',  step: 10,   min: 10,   max: 100000, note: 'Close everything when total profit reaches this. Example: 800 = close at $800 total PnL' },
-              { k: 'bear_rebuy_mode', l: 'Rebuy Level Mode', opts: [{v:'tv_based', l:'avg + 2×TV  (default: price retraces 2× time value)'}, {v:'at_avg', l:'at avg entry  (price must return to exact entry)'}], note: 'Where to set the rebuy limit after partial booking' },
+              { k: 'bear_contract_qty',       l: 'Trade Size (BTC)',   step: 0.01, min: 0.01, max: 10,    note: '1 BTC short futures + 1 CALL contract per trade' },
+              { k: 'bear_session_pnl_target', l: 'Session Target ($)', step: 10,   min: 10,   max: 100000, note: 'Close futures when total PnL (fut+hedge unrealised) ≥ this' },
             ]
           },
         ]
@@ -9360,50 +9568,82 @@ async function _updateSessionBanner() {
 
 <div class="um-h1">4. Bullish Trader</div>
 <div class="um-h2">Strategy</div>
-<div class="um-p">At window open, fetches the nearest <b>Demand Order Block</b> (OB zone where price previously bounced up sharply). Locks the zone mid as the target line. Waits for price to approach within <b>max_distance_from_line</b> pts, then runs the 4-condition hedge verification loop every second until all conditions pass simultaneously.</div>
+<div class="um-p">At window open, enters <b>VERIFY_HEDGE_LOOP</b> immediately — checks 3 option conditions every second. OB zone data is fetched for <b>reference only</b> (shown in the 4-TF panel) but does NOT gate the entry. Entry fires the moment all 3 conditions pass simultaneously.</div>
 <div class="um-box">Entry executes simultaneously:<br>
   1. <b>BUY ITM PUT option</b> &mdash; the hedge (profits if BTC drops)<br>
   2. <b>BUY LONG Futures</b> &mdash; the directional trade (profits if BTC rises)</div>
 <div class="um-h2">Full Workflow</div>
 <div class="um-ex">SLEEP
-  &rarr; window opens &rarr; CHECK_ELIGIBILITY
-  &rarr; OB zone found and locked &rarr; VERIFY_HEDGE_LOOP (runs every 1s)
-  &rarr; all 4 conditions pass &rarr; EXECUTE
+  &rarr; window opens &rarr; VERIFY_HEDGE_LOOP (runs every 1s)
+  &rarr; 3 conditions pass &rarr; EXECUTE
   &rarr; MANAGING_POSITION
-     &rarr; partial booking trigger hit &rarr; PARTIAL_BOOKING &rarr; back to MANAGING
-     &rarr; rebuy limit fills &rarr; MANAGING (updated avg)
-     &rarr; session target hit &rarr; futures closed &rarr; SLEEP (hedge held)
+     &rarr; [LOOP] partial trigger hit &rarr; PARTIAL_BOOKING (sell 50%)
+           &rarr; rebuy limit set &rarr; rebuy fills &rarr; partial_done reset
+           &rarr; new partial trigger recalculated from new avg
+           &rarr; [repeat loop until session target hit]
+     &rarr; session target achieved &rarr; futures closed &rarr; SLEEP (hedge held)
   &rarr; squareoff time &rarr; FORCE_CLOSE &rarr; SLEEP</div>
-<div class="um-h2">4 Entry Conditions (all must pass at the same instant)</div>
+<div class="um-h2">3 Entry Conditions (all must pass at the same instant)</div>
 <div class="um-box">
-  1. <b>Proximity</b>: Mark price within &plusmn;max_distance_from_line pts of OB mid<br>
-  2. <b>Premium</b>: PUT ask &le; max_premium USDT<br>
-  3. <b>Time Value</b>: PUT TV &le; max_time_value USDT<br>
-  4. <b>Spread</b>: |Ask &minus; Mark| / Mark &le; price_diff_percent% (option is liquid)
+  1. <b>Ask (Premium)</b>: PUT ask &le; your configured limit &mdash; per-role: 1st Trader max or 2nd Trader max<br>
+  2. <b>Time Value</b>: PUT TV &le; your configured TV limit &mdash; per-role value<br>
+  3. <b>Spread</b>: |Ask &minus; Mark| / Mark &le; price_diff_percent% (option is liquid)<br>
+  <br>
+  <i>No OB proximity required. OB data shown as reference only.</i>
 </div>
-<div class="um-h2">Exit Logic</div>
+<div class="um-h2">1st Trader vs 2nd Trader</div>
 <div class="um-box">
-  <b>Partial Booking</b>: Futures PnL &ge; premium &times; partial_profit_ratio &rarr; sell 50% futures, set rebuy limit at avg &minus; 2&times;TV<br>
-  <b>Rebuy Fill</b>: When price crosses the rebuy limit, the 50% is bought back at the lower level (lowers avg cost)<br>
-  <b>Full Close (TP)</b>: Session futures PnL &ge; session_pnl_target &rarr; close all futures; option kept until squareoff<br>
-  <b>Squareoff</b>: At force_close time &rarr; sell profitable leg first, then the other
+  <b>1st Trader</b>: Peer executor has no active position &rarr; uses <span class="um-tag">first_trader_max_premium</span> and <span class="um-tag">first_trader_max_time_value</span><br>
+  <b>2nd Trader</b>: Peer executor already has an active position &rarr; uses <span class="um-tag">second_trader_max_premium</span> and <span class="um-tag">second_trader_max_time_value</span> (typically stricter)<br>
+  Role is determined automatically at every verify tick. Set to 0 to use system default.
 </div>
-<div class="um-h2">Example</div>
-<div class="um-ex">BTC = $72,500. Demand OB mid = $72,400 (100 pts away, within tolerance).
-ITM PUT: strike=$73,000, ask=$320, TV=0 (deep ITM). All 4 conditions pass.
-Entry: BUY PUT @ $320 + BUY 1 BTC LONG @ $72,500. Session target = $600.
-BTC rises &rarr; $73,200. Futures PnL = (73,200 - 72,500) &times; 1 = +$700 &ge; $600. Full close fires.
-Net = $700 (futures) - $320 (premium) = +$380 USDT.</div>
+<div class="um-h2">Exit Logic — Partial TP Loop</div>
+<div class="um-box">
+  <b>Step 1 &mdash; Partial Booking trigger</b>:<br>
+  &nbsp;&nbsp;Price reaches: <code>avg_entry + premium_paid / qty</code><br>
+  &nbsp;&nbsp;&rarr; Sell 50% futures at market. Realized PnL locked.<br><br>
+  <b>Step 2 &mdash; Rebuy limit set</b>:<br>
+  &nbsp;&nbsp;LONG: <code>rebuy = avg &minus; (rebuy_mult &times; TV_at_entry)</code><br>
+  &nbsp;&nbsp;SHORT: <code>rebuy = avg + (rebuy_mult &times; TV_at_entry)</code><br>
+  &nbsp;&nbsp;1st Trader default mult = 0.5 (avg &minus; TV/2) &nbsp; 2nd Trader default = 0 (at avg exactly)<br><br>
+  <b>Step 3 &mdash; Rebuy fills</b>:<br>
+  &nbsp;&nbsp;50% bought back at rebuy price. New avg calculated. <b>partial_done reset.</b><br>
+  &nbsp;&nbsp;New partial trigger = <code>new_avg + premium_paid / new_qty</code><br>
+  &nbsp;&nbsp;&rarr; <b>Loop repeats from Step 1</b><br><br>
+  <b>Session Target (exit loop)</b>:<br>
+  &nbsp;&nbsp;When <code>total realized PnL &ge; session_pnl_target</code> &rarr; Full close all futures.<br>
+  &nbsp;&nbsp;Hedge option held until squareoff time.<br><br>
+  <b>Squareoff</b>: At force_close time &rarr; sell more profitable leg first, then other.
+</div>
+<div class="um-h2">Example — Full Cycle</div>
+<div class="um-ex">Entry: BUY PUT @ $3,590 + BUY LONG 10 BTC @ $64,000. TV at entry = $266. Target = $3,000.
+
+Cycle 1:
+  Partial trigger = $64,000 + ($3,590/10) = $64,359
+  BTC hits $64,359 &rarr; sell 5 BTC. Realized = (64,359-64,000)&times;5 = +$1,795
+  Rebuy limit (1st trader, mult=0.5) = $64,000 - (0.5&times;$266) = $63,867
+  BTC falls to $63,867 &rarr; rebuy 5 BTC fills.
+  New avg = ($64,000&times;5 + $63,867&times;5) / 10 = $63,933
+
+Cycle 2:
+  New partial trigger = $63,933 + ($3,590/10) = $64,292
+  BTC hits $64,292 &rarr; sell 5 BTC. Realized = (64,292-63,933)&times;5 = +$1,795
+  Cumulative realized = $1,795 + $1,795 = $3,590 &ge; target $3,000 &rarr; FULL CLOSE.
+
+Net: +$3,590 futures realized &minus; $3,590 premium = $0 futures net + hedge option value at squareoff.</div>
 
 <div class="um-h1">5. Bearish Trader</div>
-<div class="um-p">Mirror of Bullish &mdash; uses nearest <b>Supply OB</b> (zone where price reversed sharply downward).</div>
-<div class="um-box">1. <b>BUY ITM CALL option</b> &mdash; hedges against an upward spike<br>2. <b>SELL SHORT Futures</b> &mdash; profits if BTC falls</div>
+<div class="um-p">Exact mirror of Bullish &mdash; same 3-condition verify loop, same partial TP loop. OB Supply zones shown as reference only.</div>
+<div class="um-box">1. <b>BUY ITM CALL option</b> &mdash; hedges against an upward spike<br>2. <b>SELL SHORT Futures</b> &mdash; profits if BTC falls<br><br>
+Partial trigger (SHORT): <code>avg_entry &minus; premium/qty</code><br>
+Rebuy trigger (SHORT): <code>avg_entry + mult &times; TV</code> &nbsp;(buys back on a bounce up)</div>
 <div class="um-h2">Example</div>
-<div class="um-ex">BTC = $74,800. Supply OB mid = $75,000 (200 pts, within tolerance).
-ITM CALL: strike=$74,000, intrinsic=$800, ask=$950, TV=$150.
-Entry: BUY CALL @ $950 + SHORT 1 BTC @ $74,800.
-BTC drops &rarr; $73,200. Futures PnL = (74,800 - 73,200) &times; 1 = +$1,600 &ge; target. Full close.
-Net = $1,600 - $950 = +$650 USDT.</div>
+<div class="um-ex">Entry: BUY CALL @ $3,200 + SHORT 10 BTC @ $65,000. TV=$280. Target=$3,000.
+Partial trigger = $65,000 - ($3,200/10) = $64,680
+BTC falls to $64,680 &rarr; sell 5 BTC short (cover). Realized = (65,000-64,680)&times;5 = +$1,600
+Rebuy limit (1st trader) = $65,000 + (0.5&times;$280) = $65,140
+BTC bounces to $65,140 &rarr; rebuy 5 BTC short. New avg = $65,070.
+New partial trigger = $65,070 - $320 = $64,750. Loop continues until target.</div>
 
 <div class="um-h1">6. Volatile Event Trader</div>
 <div class="um-h2">Options Straddle Strategy</div>
@@ -9517,15 +9757,28 @@ Example: Ask=$650, Intrinsic=$500 &rarr; TV=$150 (you pay $150 purely for remain
 <div class="um-ex">LONG:  PnL = (Current Mark - Entry) &times; Qty    e.g. (73,200 - 72,500) &times; 1 = +$700
 SHORT: PnL = (Entry - Current Mark) &times; Qty    e.g. (74,800 - 73,200) &times; 1 = +$1,600</div>
 <div class="um-h2">Partial Booking Trigger Price</div>
-<div class="um-ex">LONG trigger  = Entry + (premium &times; partial_ratio) / qty
-Example: Entry=$72,500, premium=$320, ratio=1.10, qty=1
-Trigger price = $72,500 + $352 = $72,852
-When futures mark reaches $72,852 &rarr; 50% of position sold.</div>
+<div class="um-ex">LONG  trigger = avg_entry + premium_paid / qty
+SHORT trigger = avg_entry - premium_paid / qty
+
+Example: avg=$64,000, premium=$3,590, qty=10 BTC
+Trigger = $64,000 + ($3,590/10) = $64,359
+When futures mark &ge; $64,359 &rarr; sell 50% (5 BTC) at market.</div>
 <div class="um-h2">Rebuy Limit After Partial</div>
-<div class="um-ex">LONG  rebuy = avg_entry - (2 &times; TV_at_entry)   [buys dip, lowers avg cost]
-SHORT rebuy = avg_entry + (2 &times; TV_at_entry)
-Effect: new avg = old avg - TV. Full-close target price recalculated from new avg.
-Example: avg=$72,500, TV=$84 &rarr; rebuy limit @ $72,500 - $168 = $72,332</div>
+<div class="um-ex">LONG  rebuy = avg_entry - (rebuy_mult &times; TV_at_entry)
+SHORT rebuy = avg_entry + (rebuy_mult &times; TV_at_entry)
+
+1st Trader default mult = 0.5  &rarr;  avg - TV/2
+2nd Trader default mult = 0.0  &rarr;  at avg exactly
+
+Example (1st trader): avg=$64,000, TV=$266, mult=0.5
+Rebuy = $64,000 - (0.5 &times; $266) = $63,867</div>
+<div class="um-h2">Partial TP Loop (repeating until session target)</div>
+<div class="um-ex">After rebuy fills:
+  new_avg    = (old_avg &times; old_qty + rebuy_price &times; rebuy_qty) / new_qty
+  new_trigger = new_avg + premium_paid / new_qty   [partial_done reset &rarr; loop continues]
+
+Loop exits only when: cumulative realized PnL &ge; session_pnl_target
+At that point: full close all futures, hold hedge until squareoff.</div>
 <div class="um-h2">Peak and Trough PnL</div>
 <div class="um-ex">Peak PnL   = highest combined (futures + hedge) unrealized PnL reached during the trade
 Trough PnL = lowest combined unrealized PnL (worst drawdown moment)

@@ -52,9 +52,21 @@ class Config:
     bull_contract_qty:           float = 1.0      # BTC per trade
 
     # Profit management
-    bull_partial_profit_ratio:   float = 1.10     # trigger 50% futures sell at premium × ratio
-    bull_session_pnl_target:     float = 600.0    # total futures PnL target for session (USDT)
-    bull_rebuy_mode:             str   = "tv_based"  # "tv_based"=avg-2×TV | "at_avg"=rebuy at entry avg
+    bull_partial_profit_ratio:   float = 1.10     # legacy — kept for DB compat, not used in new logic
+    bull_session_pnl_target:     float = 600.0    # close futures when total PnL (fut+hedge) ≥ this
+    bull_rebuy_mode:             str   = "tv_based"  # legacy — kept for DB compat
+
+    # Per-role limits — 0 means "use the main value above as fallback"
+    # Applied dynamically: if peer already has position → second, else → first
+    bull_first_trader_max_premium:       float = 0.0   # 0 = use bull_max_premium
+    bull_second_trader_max_premium:      float = 0.0
+    bull_first_trader_max_time_value:    float = 0.0   # 0 = use bull_max_time_value
+    bull_second_trader_max_time_value:   float = 0.0
+    bull_first_trader_contract_qty:      float = 0.0   # 0 = use bull_contract_qty
+    bull_second_trader_contract_qty:     float = 0.0
+    # Rebuy TV multipliers — rebuy at: avg ± (mult × TV_at_entry)
+    bull_first_trader_rebuy_tv_mult:     float = 0.5   # 0.5 → avg ± TV/2
+    bull_second_trader_rebuy_tv_mult:    float = 0.0   # 0 → at avg exactly
 
     # Legacy alias kept so old DB configs restore without KeyError
     bull_n_hours:                float = 2.0
@@ -84,9 +96,18 @@ class Config:
 
     bear_contract_qty:           float = 1.0
 
-    bear_partial_profit_ratio:   float = 1.10
+    bear_partial_profit_ratio:   float = 1.10     # legacy — kept for DB compat
     bear_session_pnl_target:     float = 600.0
-    bear_rebuy_mode:             str   = "tv_based"  # "tv_based"=avg+2×TV | "at_avg"=rebuy at entry avg
+    bear_rebuy_mode:             str   = "tv_based"  # legacy — kept for DB compat
+
+    bear_first_trader_max_premium:       float = 0.0
+    bear_second_trader_max_premium:      float = 0.0
+    bear_first_trader_max_time_value:    float = 0.0
+    bear_second_trader_max_time_value:   float = 0.0
+    bear_first_trader_contract_qty:      float = 0.0
+    bear_second_trader_contract_qty:     float = 0.0
+    bear_first_trader_rebuy_tv_mult:     float = 0.5
+    bear_second_trader_rebuy_tv_mult:    float = 0.0
 
     bear_n_hours:                float = 2.0
     bear_n_points:               float = 150.0
@@ -196,7 +217,7 @@ class Config:
     fmp_api_key:                 str   = ""
 
     # ── Risk / paper ───────────────────────────────────────────────────────
-    q_max_btc:             float = 1.0
+    q_max_btc:             float = 1000.0
     max_option_spend:      float = 400.0
     safe_mode_timeout_sec: int   = 5
     ws_reconnect_max_sec:  int   = 30
