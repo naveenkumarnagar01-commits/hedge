@@ -1,25 +1,22 @@
 # ── Secrets ────────────────────────────────────────────────
 .env
+*.key
 
-# ── Runtime / state ────────────────────────────────────────
-hedge_state.db
+# ── Database ────────────────────────────────────────────────
 *.db
 *.db-shm
 *.db-wal
 *.sqlite3
-backups/
-temp_accounts.json
 
-# ── Logs ───────────────────────────────────────────────────
+# ── Logs / error output ─────────────────────────────────────
 *.log
 *.log.*
-server_err.txt
-server_out.txt
-server_fresh.log
-server_run_test.log
-server_log.txt
-backend_run.log
-backend_test.log
+run_log.txt
+run_err.txt
+dash_err.txt
+trader_err2.txt
+straddle_run.log
+*.txt.bak
 
 # ── Python ─────────────────────────────────────────────────
 __pycache__/
@@ -31,15 +28,16 @@ dist/
 build/
 *.egg-info/
 
-# ── Node / frontend build ───────────────────────────────────
-node_modules/
-frontend/dist/
-
 # ── OS ─────────────────────────────────────────────────────
 desktop.ini
 Thumbs.db
 .DS_Store
 
 # ── Temp / scratch ─────────────────────────────────────────
-temp_script.js
-diff.txt
+__measure.py
+status.json
+dash_out.txt
+dash_log.txt
+
+# ── Backups ─────────────────────────────────────────────────
+backups/
