@@ -53,6 +53,7 @@ class Config:
 
     # Profit management
     bull_partial_profit_ratio:   float = 1.10     # legacy — kept for DB compat, not used in new logic
+    bull_partial_tp_multiplier:  float = 2.0      # 50% qty TP fires when futures profit = N × hedge premium paid
     bull_session_pnl_target:     float = 600.0    # close futures when total PnL (fut+hedge) ≥ this
     bull_rebuy_mode:             str   = "tv_based"  # legacy — kept for DB compat
 
@@ -97,6 +98,7 @@ class Config:
     bear_contract_qty:           float = 1.0
 
     bear_partial_profit_ratio:   float = 1.10     # legacy — kept for DB compat
+    bear_partial_tp_multiplier:  float = 2.0      # 50% qty TP fires when futures profit = N × hedge premium paid
     bear_session_pnl_target:     float = 600.0
     bear_rebuy_mode:             str   = "tv_based"  # legacy — kept for DB compat
 

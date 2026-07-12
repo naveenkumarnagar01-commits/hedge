@@ -252,6 +252,24 @@ class BaseExecutor:
             await self._reset_daily()
             await self._save_state()
 
+        # ── Crash-recovery: recompute trigger prices if they were lost ──────────
+        # If the server crashed between _recalc_price_levels() and _save_state(),
+        # partial_trigger_price and/or full_close_price can be 0.  With both at 0
+        # the executor sits in MANAGING_POSITION watching prices that never match,
+        # effectively frozen until force-close time.
+        # Guard: only run when we have the data needed to compute them.
+        _tp_states = {ExState.MANAGING_POSITION, ExState.PARTIAL_BOOKING}
+        if (self.state in _tp_states
+                and self.futures_entry_price > 0
+                and self.hedge_premium_paid > 0
+                and (self.partial_trigger_price == 0.0 or self.full_close_price == 0.0)):
+            self._recalc_price_levels()
+            self.log.warning(
+                f"[crash-recovery] Trigger prices rebuilt from saved entry/premium: "
+                f"partial={self.partial_trigger_price:.2f}  "
+                f"full={self.full_close_price:.2f}"
+            )
+
         # Check if any pending limit orders would have filled while we were offline
         if saved and self.state == ExState.MANAGING_POSITION and self.is_paper:
             await self._check_missed_fills_on_reconnect()
@@ -2385,9 +2403,9 @@ class BaseExecutor:
             self.full_close_price      = 0.0
             return
 
-        # Partial trigger: price at which futures profit = total premium paid
-        # premium_paid / qty = fill_price per contract
-        pnl_partial   = self.hedge_premium_paid   # target futures PnL = full premium
+        # Partial trigger: futures profit = N × hedge premium paid (default 2×, configurable)
+        mult          = float(self._cfg("partial_tp_multiplier") or 2.0)
+        pnl_partial   = self.hedge_premium_paid * mult
         session_tgt   = float(self._cfg("session_pnl_target")
                               or self._cfg("full_close_target") or 600.0)
         remaining_pnl = session_tgt - self.session_realized_futures_pnl

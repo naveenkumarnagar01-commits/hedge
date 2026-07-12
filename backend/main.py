@@ -399,13 +399,26 @@ async def startup():
     log.info("All 3 traders started.")
     await ob_tracker.start()
 
-    # 7. Background tasks
-    asyncio.create_task(_squareoff_broadcaster(bullish, "bull_force_close_h", "bull_force_close_m"))
-    asyncio.create_task(_squareoff_broadcaster(bearish, "bear_force_close_h", "bear_force_close_m"))
-    asyncio.create_task(_state_persister())
-    asyncio.create_task(_daily_db_backup())
-    asyncio.create_task(_health_monitor())
-    asyncio.create_task(_ob_prefetch_task())
+    # 7. Background tasks — wrapped in auto-restart guard so crashes don't silently kill them
+    def _guarded(make_coro, name: str):
+        """Wrap a coroutine factory: if the task crashes, log and restart it after 10s."""
+        async def _wrapper():
+            while True:
+                try:
+                    await make_coro()
+                except asyncio.CancelledError:
+                    raise
+                except Exception as e:
+                    log.error(f"[guarded:{name}] crashed: {e} — restarting in 10s")
+                    await asyncio.sleep(10)
+        return asyncio.create_task(_wrapper(), name=name)
+
+    _guarded(lambda: _squareoff_broadcaster(bullish, "bull_force_close_h", "bull_force_close_m"), "squareoff_bull")
+    _guarded(lambda: _squareoff_broadcaster(bearish, "bear_force_close_h", "bear_force_close_m"), "squareoff_bear")
+    _guarded(lambda: _state_persister(),    "state_persister")
+    _guarded(lambda: _daily_db_backup(),    "daily_db_backup")
+    _guarded(lambda: _health_monitor(),     "health_monitor")
+    _guarded(lambda: _ob_prefetch_task(),   "ob_prefetch")
 
     log.info("System fully online.")
     log.info(f"  Bullish : {bullish.name}  (paper, 24/7)")

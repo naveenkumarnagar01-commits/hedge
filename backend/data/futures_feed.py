@@ -238,15 +238,29 @@ async def _mark_price_poller():
                         "latency_ms": 0,
                     }, source="futures_feed")
         except Exception as e:
-            log.debug(f"Mark price REST poll failed: {e}")
+            log.warning(f"Mark price REST poll failed: {e}")
+
+
+_mark_poller_task = None
 
 
 async def start():
-    global _conn
+    global _conn, _mark_poller_task
     _conn = WSConnection("futures_feed", _URL, _on_message)
     await _conn.start()
     import asyncio as _asyncio
-    _asyncio.create_task(_mark_price_poller())
+
+    async def _guarded_poller():
+        while True:
+            try:
+                await _mark_price_poller()
+            except _asyncio.CancelledError:
+                raise
+            except Exception as e:
+                log.error(f"[mark_poller] crashed: {e} — restarting in 5s")
+                await _asyncio.sleep(5)
+
+    _mark_poller_task = _asyncio.create_task(_guarded_poller(), name="mark_price_poller")
     log.info("Futures feed: markPrice@1s + bookTicker + kline_5m + depth20 | 2-step verify ON")
 
 

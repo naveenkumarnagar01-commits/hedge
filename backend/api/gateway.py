@@ -52,6 +52,9 @@ _clients: Set[WebSocket] = set()
 _event_buffer: list = []
 _MAX_BUFFER = 500
 
+# Single broadcast queue — one persistent worker instead of create_task per event
+_broadcast_queue: asyncio.Queue = None
+
 _TRADER_EXECUTOR_NAMES = {
     "bull": "BullishExecutor_Paper",
     "bear": "BearishExecutor_Paper",
@@ -108,12 +111,29 @@ async def _broadcast(msg: dict):
     _clients.difference_update(disconnected)
 
 
+async def _broadcaster_worker():
+    """Single persistent task that drains _broadcast_queue — no per-event task creation."""
+    while True:
+        try:
+            msg = await _broadcast_queue.get()
+            await _broadcast(msg)
+            _broadcast_queue.task_done()
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            log.error(f"[broadcaster] error: {e}")
+
+
 def _bus_to_ws(msg: dict):
-    """Bridge: every bus message → WebSocket broadcast."""
+    """Bridge: every bus message → WebSocket broadcast queue."""
     _event_buffer.append(msg)
     if len(_event_buffer) > _MAX_BUFFER:
         _event_buffer.pop(0)
-    asyncio.create_task(_broadcast(msg))
+    if _broadcast_queue is not None:
+        try:
+            _broadcast_queue.put_nowait(msg)
+        except asyncio.QueueFull:
+            pass  # drop oldest-ish — prevents unbounded memory under load
 
 
 # ── WebSocket endpoint ─────────────────────────────────────────────────────
@@ -641,6 +661,7 @@ _FIELD_RANGES = {
     "_premium_max": (10.0, 20000.0),
     "_time_value": (10.0, 20000.0),
     "price_diff_percent": (0.0, 100.0),
+    "_multiplier": (0.5, 20.0),
 }
 
 def _validate_config_params(body: dict) -> list[str]:
@@ -1352,5 +1373,8 @@ async def serve_panel():
 
 @app.on_event("startup")
 async def on_startup():
+    global _broadcast_queue
+    _broadcast_queue = asyncio.Queue(maxsize=2000)
+    asyncio.create_task(_broadcaster_worker())
     bus.subscribe("*", _bus_to_ws)
     log.info("Gateway started — bus bridged to WebSocket.")

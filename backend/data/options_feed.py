@@ -379,8 +379,10 @@ async def _ws_loop():
                         log.info("Expiry time reached during active connection. Closing WS to refresh.")
                         break # break inner loop to trigger reconnect and re-fetch
 
-                    try: msg = json.loads(raw)
-                    except: continue
+                    try:
+                        msg = json.loads(raw)
+                    except json.JSONDecodeError:
+                        continue
 
                     # Check for window shift (spot moves)
                     new_spot = _get_spot()
@@ -470,9 +472,24 @@ async def start():
     ok = await _fetch_expiry()
     if not ok:
         log.error("Options feed: expiry fetch failed — retrying in background")
-    asyncio.create_task(_ws_loop())
-    asyncio.create_task(_mark_loop())
-    asyncio.create_task(_broadcaster())
+
+    def _guarded(coro_fn, name: str):
+        async def _wrapper():
+            while True:
+                try:
+                    await coro_fn()
+                except asyncio.CancelledError:
+                    raise
+                except Exception as e:
+                    if not _running:
+                        return
+                    log.error(f"[options:{name}] crashed: {e} — restarting in 5s")
+                    await asyncio.sleep(5)
+        return asyncio.create_task(_wrapper(), name=f"options_{name}")
+
+    _guarded(_ws_loop,    "ws_loop")
+    _guarded(_mark_loop,  "mark_loop")
+    _guarded(_broadcaster, "broadcaster")
     log.info(
         f"Options feed: WS@100ms depth | REST mark every 5s | "
         f"NEAREST ITM CALL + NEAREST ITM PUT | {_expiry_label}"
@@ -485,7 +502,7 @@ async def stop():
     if _ws_handle:
         try:
             await _ws_handle.close()
-        except:
+        except Exception:
             pass
     _executor.shutdown(wait=False)
 

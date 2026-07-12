@@ -168,7 +168,7 @@ class PaperEngine:
             "executor":  self.executor,
         }
         self.trade_history.append(row)
-        self._snapshot_equity()
+        await self._snapshot_equity()
         return {"order_id": f"paper_{int(time.time()*1000)}",
                 "avg_price": fill_price, "qty": qty, "filled": True}
 
@@ -228,7 +228,7 @@ class PaperEngine:
             "executor":  self.executor,
         }
         self.trade_history.append(row)
-        self._snapshot_equity()
+        await self._snapshot_equity()
         return {"order_id": f"paper_opt_{int(time.time()*1000)}",
                 "avg_price": fill_price, "qty": qty, "filled": True}
 
@@ -271,7 +271,7 @@ class PaperEngine:
             "executor":  self.executor,
         }
         self.trade_history.append(row)
-        self._snapshot_equity()
+        await self._snapshot_equity()
         return {"order_id": f"paper_opt_{int(time.time()*1000)}",
                 "avg_price": fill_price, "qty": close_qty, "filled": True}
 
@@ -301,7 +301,7 @@ class PaperEngine:
         """Total premium paid for all currently open option positions."""
         return sum(pos["avg_price"] * pos["qty"] for pos in self._option_positions.values())
 
-    def _snapshot_equity(self):
+    async def _snapshot_equity(self):
         mark = self._mark_price()
         futures_mtm = 0.0
         if mark:
@@ -320,17 +320,12 @@ class PaperEngine:
         })
         if len(self.equity_curve) > 10_000:
             self.equity_curve = self.equity_curve[-10_000:]
-        # Persist after every trade so state survives restarts.
-        # Wrap in a helper so save failures are logged, not silently dropped.
-        import asyncio
-
-        async def _safe_save():
-            try:
-                await self.save_state()
-            except Exception as _e:
-                log.error(f"Paper engine state save failed: {_e}")
-
-        asyncio.create_task(_safe_save())
+        # Persist synchronously — awaited directly so a crash between fill and
+        # save cannot leave balance/positions out of sync on the next restart.
+        try:
+            await self.save_state()
+        except Exception as _e:
+            log.error(f"Paper engine state save failed: {_e}")
 
     # ── Summary ───────────────────────────────────────────────────────────
 

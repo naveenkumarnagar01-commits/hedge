@@ -43,6 +43,7 @@ class WSConnection:
         self._latency_ms  = 0.0
         self._status      = "disconnected"   # disconnected / ok / stale / failed
         self._task: Optional[asyncio.Task] = None
+        self._stale_task: Optional[asyncio.Task] = None
         self._backoff     = 1
 
     async def start(self):
@@ -101,7 +102,9 @@ class WSConnection:
             if self._on_connect:
                 await self._on_connect(ws)
 
-            asyncio.create_task(self._stale_watcher())
+            if self._stale_task and not self._stale_task.done():
+                self._stale_task.cancel()
+            self._stale_task = asyncio.create_task(self._stale_watcher())
 
             async for raw in ws:
                 recv_ts = time.time()
