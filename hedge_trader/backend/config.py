@@ -25,49 +25,48 @@ class Config:
     session_expiry_m: int = 30
 
     # ── Bullish Trader — full self-contained settings ──────────────────────
-    # Trading window (Mon–Fri only; weekends auto-skipped)
+    # Trading window — LOCKED (13:31 open → 05:30 close → 11:30 squareoff)
     bull_skip_weekends:  bool = True
     bull_blackout_dates: str  = ""
-    bull_trade_start_h:          int   = 4
-    bull_trade_start_m:          int   = 0
-    bull_trade_end_h:            int   = 18
+    bull_trade_start_h:          int   = 13
+    bull_trade_start_m:          int   = 31
+    bull_trade_end_h:            int   = 5
     bull_trade_end_m:            int   = 30
-    bull_force_close_h:          int   = 18
+    bull_force_close_h:          int   = 11   # 2h before 13:30 expiry
     bull_force_close_m:          int   = 30
 
     # Self-contained S/R analysis (runs at window open each day)
-    bull_analysis_candles:       int   = 30       # N candles to analyse
-    bull_analysis_tf_minutes:    int   = 15       # timeframe per candle (minutes)
-    bull_dominance_threshold:    float = 0.80     # min fraction of touches that must be LOWs
-    bull_touch_tolerance:        float = 30.0     # ±pts — touches within this range count
-    bull_min_touches:            int   = 3        # minimum touches to qualify as valid level
+    bull_analysis_candles:       int   = 30
+    bull_analysis_tf_minutes:    int   = 15
+    bull_dominance_threshold:    float = 0.80
+    bull_touch_tolerance:        float = 30.0
+    bull_min_touches:            int   = 3
 
-    # Entry conditions (all must pass simultaneously)
-    bull_max_premium:            float = 320.0    # max nearest ITM PUT ask (USDT)
-    bull_max_time_value:         float = 220.0    # max (ask − intrinsic)
-    bull_price_diff_percent:     float = 5.0      # max |ask−mark|/mark × 100 %
-    bull_max_distance_from_line: float = 100.0    # ±pts from locked support line
+    # Entry conditions — LOCKED
+    bull_max_premium:            float = 230.0
+    bull_max_time_value:         float = 229.0
+    bull_price_diff_percent:     float = 2.0   # mark-to-ask buffer %
+    bull_max_distance_from_line: float = 100.0
 
-    # Position sizing
-    bull_contract_qty:           float = 1.0      # BTC per trade
+    # Position sizing — LOCKED
+    bull_contract_qty:           float = 20.0
 
     # Profit management
-    bull_partial_profit_ratio:   float = 1.10     # legacy — kept for DB compat, not used in new logic
-    bull_partial_tp_multiplier:  float = 2.0      # 50% qty TP fires when futures profit = N × hedge premium paid
-    bull_session_pnl_target:     float = 600.0    # close futures when total PnL (fut+hedge) ≥ this
-    bull_rebuy_mode:             str   = "tv_based"  # legacy — kept for DB compat
+    bull_partial_profit_ratio:   float = 1.10
+    bull_partial_tp_multiplier:  float = 2.0
+    bull_session_pnl_target:     float = 600.0
+    bull_rebuy_mode:             str   = "tv_based"
 
-    # Per-role limits — 0 means "use the main value above as fallback"
-    # Applied dynamically: if peer already has position → second, else → first
-    bull_first_trader_max_premium:       float = 0.0   # 0 = use bull_max_premium
-    bull_second_trader_max_premium:      float = 0.0
-    bull_first_trader_max_time_value:    float = 0.0   # 0 = use bull_max_time_value
-    bull_second_trader_max_time_value:   float = 0.0
-    bull_first_trader_contract_qty:      float = 0.0   # 0 = use bull_contract_qty
-    bull_second_trader_contract_qty:     float = 0.0
-    # Rebuy TV multipliers — rebuy at: avg ± (mult × TV_at_entry)
-    bull_first_trader_rebuy_tv_mult:     float = 0.5   # 0.5 → avg ± TV/2
-    bull_second_trader_rebuy_tv_mult:    float = 0.0   # 0 → at avg exactly
+    # Per-role limits — LOCKED (both traders same caps)
+    bull_first_trader_max_premium:       float = 230.0
+    bull_second_trader_max_premium:      float = 230.0
+    bull_first_trader_max_time_value:    float = 229.0
+    bull_second_trader_max_time_value:   float = 229.0
+    bull_first_trader_contract_qty:      float = 20.0
+    bull_second_trader_contract_qty:     float = 20.0
+    # Re-avg rule — LOCKED at 0.5 for both roles
+    bull_first_trader_rebuy_tv_mult:     float = 0.5
+    bull_second_trader_rebuy_tv_mult:    float = 0.5
 
     # Legacy alias kept so old DB configs restore without KeyError
     bull_n_hours:                float = 2.0
@@ -75,13 +74,14 @@ class Config:
     bull_full_close_target:      float = 800.0    # fallback if session_pnl_target not set
 
     # ── Bearish Trader — full self-contained settings ──────────────────────
+    # Trading window — LOCKED (mirrors bull session)
     bear_skip_weekends:  bool = True
     bear_blackout_dates: str  = ""
-    bear_trade_start_h:          int   = 4
-    bear_trade_start_m:          int   = 0
-    bear_trade_end_h:            int   = 18
+    bear_trade_start_h:          int   = 13
+    bear_trade_start_m:          int   = 31
+    bear_trade_end_h:            int   = 5
     bear_trade_end_m:            int   = 30
-    bear_force_close_h:          int   = 18
+    bear_force_close_h:          int   = 11   # 2h before 13:30 expiry
     bear_force_close_m:          int   = 30
 
     bear_analysis_candles:       int   = 30
@@ -90,26 +90,30 @@ class Config:
     bear_touch_tolerance:        float = 30.0
     bear_min_touches:            int   = 3
 
-    bear_max_premium:            float = 320.0
-    bear_max_time_value:         float = 220.0
-    bear_price_diff_percent:     float = 5.0
+    # Entry conditions — LOCKED
+    bear_max_premium:            float = 230.0
+    bear_max_time_value:         float = 229.0
+    bear_price_diff_percent:     float = 2.0   # mark-to-ask buffer %
     bear_max_distance_from_line: float = 100.0
 
-    bear_contract_qty:           float = 1.0
+    # Position sizing — LOCKED
+    bear_contract_qty:           float = 20.0
 
-    bear_partial_profit_ratio:   float = 1.10     # legacy — kept for DB compat
-    bear_partial_tp_multiplier:  float = 2.0      # 50% qty TP fires when futures profit = N × hedge premium paid
+    bear_partial_profit_ratio:   float = 1.10
+    bear_partial_tp_multiplier:  float = 2.0
     bear_session_pnl_target:     float = 600.0
-    bear_rebuy_mode:             str   = "tv_based"  # legacy — kept for DB compat
+    bear_rebuy_mode:             str   = "tv_based"
 
-    bear_first_trader_max_premium:       float = 0.0
-    bear_second_trader_max_premium:      float = 0.0
-    bear_first_trader_max_time_value:    float = 0.0
-    bear_second_trader_max_time_value:   float = 0.0
-    bear_first_trader_contract_qty:      float = 0.0
-    bear_second_trader_contract_qty:     float = 0.0
+    # Per-role limits — LOCKED (both traders same caps)
+    bear_first_trader_max_premium:       float = 230.0
+    bear_second_trader_max_premium:      float = 230.0
+    bear_first_trader_max_time_value:    float = 229.0
+    bear_second_trader_max_time_value:   float = 229.0
+    bear_first_trader_contract_qty:      float = 20.0
+    bear_second_trader_contract_qty:     float = 20.0
+    # Re-avg rule — LOCKED at 0.5 for both roles
     bear_first_trader_rebuy_tv_mult:     float = 0.5
-    bear_second_trader_rebuy_tv_mult:    float = 0.0
+    bear_second_trader_rebuy_tv_mult:    float = 0.5
 
     bear_n_hours:                float = 2.0
     bear_n_points:               float = 150.0
@@ -257,6 +261,31 @@ class Config:
 # Module-level singleton
 cfg = Config()
 
+# Fields that cannot be changed via /api/config or the settings panel.
+# Values are always taken from the code defaults above.
+_LOCKED_FIELDS: frozenset = frozenset({
+    # Trading window
+    "bull_trade_start_h", "bull_trade_start_m",
+    "bull_trade_end_h",   "bull_trade_end_m",
+    "bull_force_close_h", "bull_force_close_m",
+    "bear_trade_start_h", "bear_trade_start_m",
+    "bear_trade_end_h",   "bear_trade_end_m",
+    "bear_force_close_h", "bear_force_close_m",
+    # Premium / TV caps
+    "bull_max_premium", "bull_first_trader_max_premium", "bull_second_trader_max_premium",
+    "bear_max_premium", "bear_first_trader_max_premium", "bear_second_trader_max_premium",
+    "bull_max_time_value", "bull_first_trader_max_time_value", "bull_second_trader_max_time_value",
+    "bear_max_time_value", "bear_first_trader_max_time_value", "bear_second_trader_max_time_value",
+    # Mark-to-ask buffer
+    "bull_price_diff_percent", "bear_price_diff_percent",
+    # Quantity
+    "bull_contract_qty", "bull_first_trader_contract_qty", "bull_second_trader_contract_qty",
+    "bear_contract_qty", "bear_first_trader_contract_qty", "bear_second_trader_contract_qty",
+    # Re-avg rule
+    "bull_first_trader_rebuy_tv_mult", "bull_second_trader_rebuy_tv_mult",
+    "bear_first_trader_rebuy_tv_mult", "bear_second_trader_rebuy_tv_mult",
+})
+
 _listeners: list = []
 
 
@@ -267,6 +296,8 @@ def register_listener(coro):
 async def update(params: Dict[str, Any]) -> Dict[str, str]:
     changes = {}
     for key, new_val in params.items():
+        if key in _LOCKED_FIELDS:
+            continue  # silently ignore — locked fields are set in code only
         if not hasattr(cfg, key):
             log.warning(f"Unknown config key ignored: {key}")
             continue
