@@ -43,7 +43,7 @@ class Config:
     bull_min_touches:            int   = 3
 
     # Entry conditions — LOCKED
-    bull_max_premium:            float = 600.0
+    bull_max_premium:            float = 250.0
     bull_max_time_value:         float = 229.0
     bull_price_diff_percent:     float = 4.0   # mark-to-ask buffer %
     bull_max_distance_from_line: float = 100.0
@@ -58,8 +58,8 @@ class Config:
     bull_rebuy_mode:             str   = "tv_based"
 
     # Per-role limits — LOCKED (both traders same caps)
-    bull_first_trader_max_premium:       float = 600.0
-    bull_second_trader_max_premium:      float = 600.0
+    bull_first_trader_max_premium:       float = 250.0
+    bull_second_trader_max_premium:      float = 250.0
     bull_first_trader_max_time_value:    float = 229.0
     bull_second_trader_max_time_value:   float = 229.0
     bull_first_trader_contract_qty:      float = 20.0
@@ -91,7 +91,7 @@ class Config:
     bear_min_touches:            int   = 3
 
     # Entry conditions — LOCKED
-    bear_max_premium:            float = 600.0
+    bear_max_premium:            float = 250.0
     bear_max_time_value:         float = 229.0
     bear_price_diff_percent:     float = 4.0   # mark-to-ask buffer %
     bear_max_distance_from_line: float = 100.0
@@ -105,8 +105,8 @@ class Config:
     bear_rebuy_mode:             str   = "tv_based"
 
     # Per-role limits — LOCKED (both traders same caps)
-    bear_first_trader_max_premium:       float = 600.0
-    bear_second_trader_max_premium:      float = 600.0
+    bear_first_trader_max_premium:       float = 250.0
+    bear_second_trader_max_premium:      float = 250.0
     bear_first_trader_max_time_value:    float = 229.0
     bear_second_trader_max_time_value:   float = 229.0
     bear_first_trader_contract_qty:      float = 20.0
