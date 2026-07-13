@@ -43,9 +43,7 @@ class PaperEngine:
     # ── Persistence ────────────────────────────────────────────────────────
 
     def load_state(self, state_key: str = "paper_engine_state"):
-        """Restore paper engine state from SQLite — called once at startup.
-        trade_history and equity_curve are NOT restored — they are session-only
-        and should start fresh on each server run."""
+        """Restore paper engine state from SQLite — called once at startup."""
         saved = store.get(state_key)
         if not saved:
             return
@@ -54,10 +52,10 @@ class PaperEngine:
         self._positions            = saved.get("positions", {})
         self._option_positions     = saved.get("option_positions", {})
         self._realized_pnl         = float(saved.get("realized_pnl", 0.0))
-        # trade_history / equity_curve intentionally NOT restored (session-only)
+        self.equity_curve          = saved.get("equity_curve", [])
         log.info(
             f"Paper engine state restored [{state_key}]: balance={self.balance:,.2f}  "
-            f"positions={len(self._positions)}"
+            f"positions={len(self._positions)}  equity_points={len(self.equity_curve)}"
         )
 
     async def save_state(self):
@@ -68,6 +66,7 @@ class PaperEngine:
             "positions":        dict(self._positions),
             "option_positions": dict(self._option_positions),
             "realized_pnl":     self._realized_pnl,
+            "equity_curve":     self.equity_curve[-500:],
         })
 
     async def reset(self):
@@ -80,7 +79,8 @@ class PaperEngine:
         self._realized_pnl          = 0.0
         key = getattr(self, "_state_key", "paper_engine_state")
         await store.set(key, {
-            "balance": self.balance, "positions": {}, "option_positions": {}, "realized_pnl": 0.0,
+            "balance": self.balance, "positions": {}, "option_positions": {},
+            "realized_pnl": 0.0, "equity_curve": [],
         })
         log.info(f"Paper engine reset. Balance: {self.balance:,.2f} USDT")
 
